@@ -1,0 +1,176 @@
+// Package graphops is Layer 2: predicate metadata and graph-conscious
+// operations over a triple store.
+//
+// This package knows about predicates (functional vs. relational,
+// inverses, symmetry) and path composition, but nothing about sevens,
+// PKM, or any specific predicate vocabulary.
+//
+// Reusable outside sevens -- a Haskell port or a different domain
+// would use the same abstractions.
+package graphops
+
+import (
+	"context"
+
+	"sevens/internal/triple"
+)
+
+// Multiplicity describes how many objects a predicate allows per subject.
+type Multiplicity int
+
+const (
+	Relational Multiplicity = iota // zero or more (set-valued)
+	Functional                     // exactly one (or zero if optional)
+)
+
+// PredicateSpec declares the properties of a predicate that graph
+// operations need to behave correctly.
+//
+// Design note: this is Layer 2 state from the concept doc. The graph
+// (Layer 1) doesn't carry this metadata. Layer 2 uses it to provide
+// correct operations (e.g., Set only works on Functional predicates).
+type PredicateSpec struct {
+	Name         string
+	Multiplicity Multiplicity
+	Inverse      string // name used when traversing backward; empty if none
+	Symmetric    bool   // if true, (A,r,B) implies (B,r,A)
+	Transitive   bool   // if true, reachability queries can follow chains
+}
+
+// Graph wraps a triple.Store with predicate metadata and provides
+// higher-level graph operations.
+//
+// Go idiom: Graph depends on triple.Store (a concrete type from
+// the layer below). It doesn't depend on anything above. This is
+// the clean dependency direction: Layer 2 -> Layer 1.
+type Graph struct {
+	store *triple.Store
+	specs map[string]*PredicateSpec
+}
+
+// New creates a Graph backed by the given triple store.
+func New(store *triple.Store) *Graph {
+	return &Graph{
+		store: store,
+		specs: make(map[string]*PredicateSpec),
+	}
+}
+
+// RegisterPredicate declares a predicate's metadata. Call this during
+// initialization to set up the vocabulary before performing operations.
+//
+// Layer 3 (kb) calls this to register node/parent, node/content, etc.
+// Layer 4 (user-defined) could call it for custom predicates.
+func (g *Graph) RegisterPredicate(spec PredicateSpec) {
+	g.specs[spec.Name] = &spec
+}
+
+// --- Operations that use predicate metadata ---
+
+// Set writes a value for a functional predicate. It retracts any
+// existing value for (subject, predicate) before asserting the new one.
+//
+// This is the operation that was in triple.Store as SetTriple.
+// It moved here because it requires knowing the predicate is functional --
+// that's metadata knowledge, not bare storage.
+func (g *Graph) Set(ctx context.Context, subject, predicate, object string) error {
+	// Optional: validate that the predicate is registered as Functional.
+	// For now, just do the retract-then-assert.
+	panic("TODO")
+}
+
+// Lookup returns the single object for a functional predicate.
+// Returns ("", false) if no value exists.
+func (g *Graph) Lookup(ctx context.Context, subject, predicate string) (string, bool, error) {
+	panic("TODO")
+}
+
+// --- Path composition ---
+
+// PathStep is one hop in a composed path. Forward follows
+// (subject, predicate) -> objects. Inverse follows
+// (predicate, object) -> subjects (i.e., traverse the arrow backward).
+type PathStep struct {
+	Predicate string
+	Inverse   bool
+}
+
+// ParsePath converts a string path like ["node/parent", "node/parent~"]
+// into typed PathSteps. The ~ suffix means inverse traversal.
+//
+// This is the operation from apply/patheval.go, generalized.
+// It doesn't know what "node/parent" means -- it just knows that
+// ~ means inverse.
+func ParsePath(predicates []string) []PathStep {
+	steps := make([]PathStep, len(predicates))
+	for i, p := range predicates {
+		if len(p) > 0 && p[len(p)-1] == '~' {
+			steps[i] = PathStep{Predicate: p[:len(p)-1], Inverse: true}
+		} else {
+			steps[i] = PathStep{Predicate: p, Inverse: false}
+		}
+	}
+	return steps
+}
+
+// Compose walks a sequence of predicate hops from a starting subject,
+// returning all subjects reachable at the end of the path.
+//
+// This is arrow composition: follow predicate A, then predicate B,
+// then predicate C. Each step either goes forward (subject->object)
+// or inverse (object->subject).
+//
+// The current code does this hop-by-hop in apply/patheval.go with
+// individual GetObjects/GetSubjects calls. This centralizes it.
+func (g *Graph) Compose(ctx context.Context, start string, path []PathStep) ([]string, error) {
+	current := []string{start}
+	for _, step := range path {
+		var next []string
+		for _, subj := range current {
+			var results []string
+			var err error
+			if step.Inverse {
+				results, err = g.store.ByPredicateObject(ctx, step.Predicate, subj)
+			} else {
+				results, err = g.store.BySubjectPredicate(ctx, subj, step.Predicate)
+			}
+			if err != nil {
+				return nil, err
+			}
+			next = append(next, results...)
+		}
+		current = deduplicate(next)
+	}
+	return current, nil
+}
+
+// Reachable returns all subjects reachable from start by recursively
+// following a predicate. Requires the predicate to be registered as
+// transitive, or just does the recursive walk regardless.
+func (g *Graph) Reachable(ctx context.Context, start string, predicate string, inverse bool) ([]string, error) {
+	panic("TODO")
+}
+
+// RetractSubgraph retracts all triples for subjects reachable from
+// root via a membership predicate. This is "clear everything belonging
+// to this root" generalized.
+//
+// Currently ClearRootTriples in store.go -- moved here because it
+// needs to know which predicates define membership.
+func (g *Graph) RetractSubgraph(ctx context.Context, root string, membershipPredicate string) error {
+	panic("TODO")
+}
+
+// --- Helpers ---
+
+func deduplicate(ss []string) []string {
+	seen := make(map[string]struct{}, len(ss))
+	result := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			result = append(result, s)
+		}
+	}
+	return result
+}

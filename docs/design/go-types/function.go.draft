@@ -1,0 +1,515 @@
+// Package function is the Function concept: typed transformations on
+// the knowledge base, composed as curried pipelines with configurable
+// gates and control flow.
+//
+// This package owns:
+// - Function and Step definitions (the "what")
+// - Signatures (the backend-agnostic contract)
+// - Pipeline state machine (the "how it executes")
+// - Gate and control flow configuration
+// - Context resolution and prompt rendering
+//
+// It does NOT own:
+// - The actual LLM call (that's a TransformBackend)
+// - Log entries (written via sync to kb)
+// - File I/O (that's projection)
+// - The graph itself (that's kb)
+package function
+
+import (
+	"context"
+
+	"sevens/internal/kb"
+)
+
+// ============================================================
+// Backend interface
+// ============================================================
+
+// TransformBackend is the abstraction over execution mechanisms.
+// An LLM sends a prompt to an API. A deterministic backend runs
+// code. An agent-mode backend returns a checklist.
+//
+// Go idiom: this interface is defined WHERE IT'S USED (here in
+// function), not where it's implemented (in backend/). This is
+// "accept interfaces, return structs." The function package
+// doesn't know or care what's behind this interface.
+type TransformBackend interface {
+	Execute(ctx context.Context, prompt RenderedPrompt) (TransformResult, error)
+	Name() string
+}
+
+// RenderedPrompt is the fully rendered prompt ready for a backend.
+type RenderedPrompt struct {
+	System string // system-level instructions
+	User   string // the main prompt with resolved context
+	Model  string // model ID or tier name
+}
+
+// TransformResult is what a backend produces.
+type TransformResult struct {
+	Raw    string   // raw text output
+	Ops    []FileOp // parsed structured output (if applicable)
+	IsText bool     // true if output is display-only, not graph-mutating
+}
+
+// FileOp is a single file operation returned by a transformation.
+// Kept here (not in projection) because it's part of the function's
+// output signature -- what the transformation produces.
+type FileOp struct {
+	Action  string            // "create" or "edit"
+	Title   string            // for create: new node title
+	Parent  string            // for create: parent node title
+	File    string            // for edit: node title of target file
+	OldText string            // for edit: text to find
+	NewText string            // for edit: replacement text
+	Content string            // for create: markdown body
+	Extra   map[string]string // additional frontmatter fields
+}
+
+// ============================================================
+// Function definition
+// ============================================================
+
+// Signature is the backend-agnostic contract for a step's
+// input and output. This is what makes composition type-checkable.
+type Signature struct {
+	Shape  OutputShape // text, structured, file-ops
+	Schema string      // for structured: JSON schema or equivalent
+}
+
+// OutputShape classifies what a step produces.
+type OutputShape int
+
+const (
+	ShapeText       OutputShape = iota // display only, no graph mutation
+	ShapeStructured                    // JSON conforming to a schema
+	ShapeFileOps                       // []FileOp for graph mutation
+)
+
+// GateSpec configures the review state machine at a pipeline step.
+type GateSpec struct {
+	Revisable        bool
+	HistoryPolicy    HistoryPolicy
+	Cancelable       bool
+	AutoAccept       bool
+	RollbackOnReject bool
+}
+
+// HistoryPolicy controls what the backend sees during revision.
+type HistoryPolicy int
+
+const (
+	HistoryNone   HistoryPolicy = iota // stateless retry
+	HistoryLatest                      // most recent attempt + feedback
+	HistoryFull                        // complete revision chain
+)
+
+// ControlFlow configures iteration behavior for a step.
+type ControlFlow struct {
+	Kind        FlowKind
+	Termination Termination   // for loops
+	Accumulator AccumulatorPolicy // for loops
+}
+
+type FlowKind int
+
+const (
+	FlowSequence FlowKind = iota
+	FlowLoop
+	FlowBranch
+)
+
+type Termination int
+
+const (
+	TerminateUser      Termination = iota // user ends with .end
+	TerminateCondition                    // output satisfies a predicate
+)
+
+type AccumulatorPolicy int
+
+const (
+	AccumulatorReplace AccumulatorPolicy = iota
+	AccumulatorAppend
+)
+
+// PathSpec declares a morphism path to traverse for context gathering.
+type PathSpec struct {
+	Path        []string // predicates to walk (~ suffix = inverse)
+	ExcludeSelf bool
+	With        []string // additional predicates to fetch at terminals
+	As          string   // template variable name
+}
+
+// Require declares a named role a step needs resolved from the graph.
+type Require struct {
+	Role     string // "target", "parent", "siblings", etc.
+	Type     string // "node", "node[]"
+	Optional bool
+	As       string // template variable name override
+}
+
+// BackendSpec is the backend-specific part of a step definition.
+type BackendSpec struct {
+	Kind           BackendKind
+	PromptTemplate string // for LLM: the template with {{variables}}
+	Persona        string // for LLM: behavioral framing
+	SystemPrompt   string // for LLM: system-level instructions
+	Handler        string // for deterministic: code reference
+}
+
+type BackendKind int
+
+const (
+	BackendLLM           BackendKind = iota
+	BackendDeterministic
+	BackendAgent
+)
+
+// Step is one stage in a function's pipeline.
+type Step struct {
+	Name      string
+	Requires  []Require
+	Paths     []PathSpec
+	Input     Signature
+	Output    Signature
+	Gate      *GateSpec    // nil = no gate (auto-advance)
+	Flow      *ControlFlow // nil = sequence (default)
+	Backend   BackendSpec
+	ComposedOf string     // delegate to another function by name
+	MapOver    string     // predicate path to map over
+}
+
+// Function is a named, reusable transformation defined as config.
+type Function struct {
+	Name        string
+	Description string
+	Steps       []Step
+	ContextPolicy string // "minimal", "neighborhood", "full" (shorthand)
+}
+
+// EffectiveSteps normalizes single-step shorthand into a one-step slice.
+func (f *Function) EffectiveSteps() []Step {
+	return f.Steps // TODO: handle legacy single-prompt shorthand
+}
+
+// ValidateComposition checks that step output signatures are compatible
+// with subsequent step input signatures.
+func (f *Function) ValidateComposition() error {
+	panic("TODO")
+}
+
+// ============================================================
+// Pipeline state machine
+// ============================================================
+
+// PipelinePhase is the current state of a pipeline.
+// Named "Phase" not "State" to avoid collision with Go's common
+// usage of "state" and Forge's reserved word (lesson learned).
+type PipelinePhase int
+
+const (
+	PhaseRunning   PipelinePhase = iota
+	PhasePending
+	PhaseAccepted
+	PhaseLooping
+	PhaseRejected
+	PhaseCancelled
+	PhaseCompleted
+)
+
+// RevisionEntry is one (attempt, feedback) pair in the revision chain.
+type RevisionEntry struct {
+	Attempt  TransformResult
+	Feedback string
+}
+
+// Pipeline is the live, mutable state of a curried function application.
+// This is the thing that gets persisted to the DB so you can close
+// your terminal and resume later.
+type Pipeline struct {
+	ID               string
+	FunctionName     string
+	Root             string
+	Target           string // node subject
+	CurrentStep      int
+	Phase            PipelinePhase
+	CurrentResult    *TransformResult
+	Accumulator      *TransformResult   // for looping steps
+	RevisionChain    []RevisionEntry
+	PriorStepResults []TransformResult
+}
+
+// ============================================================
+// Pipeline actions
+// ============================================================
+
+// Executor runs pipelines. It holds the dependencies needed for
+// execution (KB for context resolution, backend for transformation).
+//
+// Go idiom: Executor accepts interfaces for its dependencies.
+// This means you can test it with mock KB and mock backend.
+type Executor struct {
+	kb      KnowledgeBase // interface defined below
+	loadFn  func(name string) (*Function, error)
+}
+
+// KnowledgeBase is the interface this package needs from Layer 3.
+// Defined here, satisfied by kb.KB implicitly.
+//
+// Go idiom: "accept interfaces, return structs." This interface
+// lists ONLY the kb methods that function execution actually calls.
+// If kb.KB has 30 methods but we only need 5, we list 5.
+type KnowledgeBase interface {
+	Walk(ctx context.Context, root, title string) (*kb.WalkContext, error)
+	Children(ctx context.Context, root, title string) ([]string, error)
+	Parent(ctx context.Context, root, title string) (*string, error)
+	Siblings(ctx context.Context, root, title string) ([]string, error)
+	AppendLog(ctx context.Context, entry kb.LogEntry) error
+	ReadLog(ctx context.Context, root, nodeTitle string) ([]kb.LogEntry, error)
+}
+
+// NewExecutor creates a pipeline executor.
+func NewExecutor(kb KnowledgeBase, loadFn func(string) (*Function, error)) *Executor {
+	return &Executor{kb: kb, loadFn: loadFn}
+}
+
+// Apply starts a new pipeline for a function on a target node.
+// Executes the first step and returns the pipeline in its
+// resulting state.
+func (e *Executor) Apply(ctx context.Context, backend TransformBackend, root, functionName, target string) (*Pipeline, error) {
+	fn, err := e.loadFn(functionName)
+	if err != nil {
+		return nil, err
+	}
+
+	pipeline := &Pipeline{
+		ID:           generatePipelineID(root),
+		FunctionName: functionName,
+		Root:         root,
+		Target:       target,
+		CurrentStep:  0,
+		Phase:        PhaseRunning,
+	}
+
+	// Execute first step
+	return e.executeCurrentStep(ctx, backend, pipeline, fn)
+}
+
+// Accept transitions a Pending pipeline to Accepted.
+func (e *Executor) Accept(ctx context.Context, pipeline *Pipeline) (*Pipeline, error) {
+	if pipeline.Phase != PhasePending {
+		return nil, fmt.Errorf("cannot accept: pipeline is %v, not Pending", pipeline.Phase)
+	}
+	pipeline.Phase = PhaseAccepted
+	return pipeline, nil
+}
+
+// Reject transitions a Pending pipeline to Rejected.
+func (e *Executor) Reject(ctx context.Context, pipeline *Pipeline) (*Pipeline, error) {
+	if pipeline.Phase != PhasePending {
+		return nil, fmt.Errorf("cannot reject: pipeline is %v, not Pending", pipeline.Phase)
+	}
+	pipeline.Phase = PhaseRejected
+	// TODO: sync log entry for rejection
+	return pipeline, nil
+}
+
+// Revise re-executes the current step with feedback. Pipeline stays Pending
+// with a new result.
+func (e *Executor) Revise(ctx context.Context, backend TransformBackend, pipeline *Pipeline, feedback string) (*Pipeline, error) {
+	if pipeline.Phase != PhasePending {
+		return nil, fmt.Errorf("cannot revise: pipeline is %v, not Pending", pipeline.Phase)
+	}
+
+	fn, err := e.loadFn(pipeline.FunctionName)
+	if err != nil {
+		return nil, err
+	}
+
+	step := fn.EffectiveSteps()[pipeline.CurrentStep]
+	if step.Gate == nil || !step.Gate.Revisable {
+		return nil, fmt.Errorf("step %q is not revisable", step.Name)
+	}
+
+	// Record current attempt in revision chain
+	if pipeline.CurrentResult != nil {
+		pipeline.RevisionChain = append(pipeline.RevisionChain, RevisionEntry{
+			Attempt:  *pipeline.CurrentResult,
+			Feedback: feedback,
+		})
+	}
+
+	// Build revision context based on history policy
+	// Re-execute step with feedback injected
+	// Validate result against output signature
+	// Pipeline stays Pending with new result
+	panic("TODO")
+}
+
+// Advance moves an Accepted pipeline to the next step.
+// Applies the accepted result, then executes the next step.
+func (e *Executor) Advance(ctx context.Context, backend TransformBackend, pipeline *Pipeline) (*Pipeline, error) {
+	if pipeline.Phase != PhaseAccepted {
+		return nil, fmt.Errorf("cannot advance: pipeline is %v, not Accepted", pipeline.Phase)
+	}
+
+	fn, err := e.loadFn(pipeline.FunctionName)
+	if err != nil {
+		return nil, err
+	}
+
+	steps := fn.EffectiveSteps()
+
+	// Store the accepted result
+	if pipeline.CurrentResult != nil {
+		pipeline.PriorStepResults = append(pipeline.PriorStepResults, *pipeline.CurrentResult)
+	}
+
+	// Move to next step
+	pipeline.CurrentStep++
+	if pipeline.CurrentStep >= len(steps) {
+		pipeline.Phase = PhaseCompleted
+		return pipeline, nil
+	}
+
+	// Execute next step
+	pipeline.Phase = PhaseRunning
+	pipeline.CurrentResult = nil
+	pipeline.RevisionChain = nil
+	return e.executeCurrentStep(ctx, backend, pipeline, fn)
+}
+
+// ContinueLoop continues a looping step (next iteration).
+func (e *Executor) ContinueLoop(ctx context.Context, backend TransformBackend, pipeline *Pipeline, input string) (*Pipeline, error) {
+	if pipeline.Phase != PhaseLooping {
+		return nil, fmt.Errorf("cannot continue: pipeline is %v, not Looping", pipeline.Phase)
+	}
+	// Append to accumulator if policy is append
+	// Re-execute same step with accumulated context
+	panic("TODO")
+}
+
+// EndLoop breaks out of a loop and advances to the next step.
+func (e *Executor) EndLoop(ctx context.Context, backend TransformBackend, pipeline *Pipeline) (*Pipeline, error) {
+	if pipeline.Phase != PhaseLooping {
+		return nil, fmt.Errorf("cannot end loop: pipeline is %v, not Looping", pipeline.Phase)
+	}
+	// Move accumulated result to PriorStepResults
+	// Advance to next step or Complete if last
+	panic("TODO")
+}
+
+// Cancel terminates a pipeline from Pending or Looping state.
+func (e *Executor) Cancel(ctx context.Context, pipeline *Pipeline) (*Pipeline, error) {
+	if pipeline.Phase != PhasePending && pipeline.Phase != PhaseLooping {
+		return nil, fmt.Errorf("cannot cancel: pipeline is %v", pipeline.Phase)
+	}
+	pipeline.Phase = PhaseCancelled
+	return pipeline, nil
+}
+
+// --- Internal helpers ---
+
+// executeCurrentStep resolves context, renders prompt, calls backend,
+// and transitions the pipeline based on the step's gate/flow config.
+func (e *Executor) executeCurrentStep(ctx context.Context, backend TransformBackend, pipeline *Pipeline, fn *Function) (*Pipeline, error) {
+	step := fn.EffectiveSteps()[pipeline.CurrentStep]
+
+	// 1. Resolve context from graph via KB
+	// 2. Render prompt using step's BackendSpec
+	// 3. Call backend.Execute
+	// 4. Validate result against output signature
+	// 5. Transition based on gate/flow config:
+	//    - gated + not autoAccept -> Pending
+	//    - gated + autoAccept -> Accepted (then auto-advance)
+	//    - looping -> Looping
+	//    - ungated + more steps -> auto-advance (recurse)
+	//    - ungated + last step -> Completed
+	panic("TODO")
+}
+
+func generatePipelineID(root string) string {
+	panic("TODO: root hash + timestamp + random")
+}
+
+// ============================================================
+// Pipeline persistence
+// ============================================================
+
+// PipelineStore handles reading and writing pipeline state to the
+// triple store. Pipeline state is stored as triples with pipeline/*
+// predicates.
+//
+// This is separate from Executor because persistence is orthogonal
+// to execution. You could run a pipeline entirely in memory (tests)
+// or persist every transition (production).
+type PipelineStore struct {
+	kb KnowledgeBase
+}
+
+// Save persists a pipeline's current state as triples.
+func (ps *PipelineStore) Save(ctx context.Context, pipeline *Pipeline) error {
+	panic("TODO: assert pipeline/* triples")
+}
+
+// Load reconstructs a pipeline from its persisted triples.
+func (ps *PipelineStore) Load(ctx context.Context, pipelineID string) (*Pipeline, error) {
+	panic("TODO: read pipeline/* triples, reconstruct Pipeline struct")
+}
+
+// FindPending returns all pipelines in Pending or Looping state,
+// optionally scoped by root.
+func (ps *PipelineStore) FindPending(ctx context.Context, root string) ([]*Pipeline, error) {
+	panic("TODO")
+}
+
+// ============================================================
+// Context resolution
+// ============================================================
+
+// ResolvedContext holds all resolved inputs for a step, ready for
+// prompt rendering.
+type ResolvedContext struct {
+	Target      kb.WalkContext
+	Parent      *string
+	Siblings    []ResolvedNode
+	Children    []ResolvedNode
+	History     []kb.LogEntry
+	PriorOutput string // output from previous step
+	Instruction string // ad-hoc instruction via {{instruction}}
+}
+
+// ResolvedNode is a fetched node's content for template rendering.
+type ResolvedNode struct {
+	Title   string
+	Content string
+	Role    string
+}
+
+// resolveContext gathers graph context for a step based on its
+// Requires and PathSpec declarations.
+func (e *Executor) resolveContext(ctx context.Context, root string, step Step, target string, prev string) (*ResolvedContext, error) {
+	panic("TODO: walk paths, resolve requires, assemble context")
+}
+
+// renderPrompt substitutes resolved context into a step's prompt template.
+func renderPrompt(step Step, rctx *ResolvedContext) RenderedPrompt {
+	panic("TODO: template substitution")
+}
+
+// ============================================================
+// Function loading
+// ============================================================
+
+// LoadFunction reads a function definition from config files.
+// Searches user config dir first, then bundled defaults.
+func LoadFunction(name string) (*Function, error) {
+	panic("TODO: read EDN + markdown sidecar, construct Function")
+}
+
+// ListFunctions returns all available function names.
+func ListFunctions() ([]string, error) {
+	panic("TODO")
+}

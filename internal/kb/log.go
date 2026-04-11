@@ -1,0 +1,105 @@
+package kb
+
+import (
+	"context"
+	"crypto/rand"
+	"fmt"
+	"sort"
+	"time"
+
+	"sevens/internal/triple"
+)
+
+// LogEntry records a function application or pipeline transition.
+type LogEntry struct {
+	Subject   string
+	Event     string
+	Root      string
+	Function  string
+	Node      string
+	Step      string
+	StepIndex string
+	Timestamp string
+	Session   string
+	Result    string
+}
+
+// AppendLog writes a log entry as triples. Generates a unique subject
+// for the entry.
+func (k *KB) AppendLog(ctx context.Context, entry LogEntry) error {
+	if entry.Subject == "" {
+		entry.Subject = logSubject(entry.Node)
+	}
+
+	triples := []triple.Triple{
+		{entry.Subject, PredLogEvent, entry.Event},
+		{entry.Subject, PredLogTimestamp, entry.Timestamp},
+	}
+	if entry.Root != "" {
+		triples = append(triples, triple.Triple{entry.Subject, PredLogRoot, entry.Root})
+	}
+	if entry.Function != "" {
+		triples = append(triples, triple.Triple{entry.Subject, PredLogFunction, entry.Function})
+	}
+	if entry.Node != "" {
+		triples = append(triples, triple.Triple{entry.Subject, PredLogNode, entry.Node})
+	}
+	if entry.Step != "" {
+		triples = append(triples, triple.Triple{entry.Subject, PredLogStep, entry.Step})
+	}
+	if entry.StepIndex != "" {
+		triples = append(triples, triple.Triple{entry.Subject, PredLogStepIndex, entry.StepIndex})
+	}
+	if entry.Session != "" {
+		triples = append(triples, triple.Triple{entry.Subject, PredLogSession, entry.Session})
+	}
+	if entry.Result != "" {
+		triples = append(triples, triple.Triple{entry.Subject, PredLogResult, entry.Result})
+	}
+
+	return k.graph.Store().AssertBatch(ctx, triples)
+}
+
+// ReadLog returns log entries for a node, ordered by timestamp.
+func (k *KB) ReadLog(ctx context.Context, root, nodeTitle string) ([]LogEntry, error) {
+	// Find all log subjects that reference this node
+	subjects, err := k.graph.Store().ByPredicateObject(ctx, PredLogNode, nodeTitle)
+	if err != nil {
+		return nil, err
+	}
+
+	var entries []LogEntry
+	for _, subj := range subjects {
+		// Optionally filter by root
+		if root != "" {
+			r, _, _ := k.graph.Lookup(ctx, subj, PredLogRoot)
+			if r != root {
+				continue
+			}
+		}
+
+		entry := LogEntry{Subject: subj}
+		entry.Event, _, _ = k.graph.Lookup(ctx, subj, PredLogEvent)
+		entry.Root, _, _ = k.graph.Lookup(ctx, subj, PredLogRoot)
+		entry.Function, _, _ = k.graph.Lookup(ctx, subj, PredLogFunction)
+		entry.Node, _, _ = k.graph.Lookup(ctx, subj, PredLogNode)
+		entry.Step, _, _ = k.graph.Lookup(ctx, subj, PredLogStep)
+		entry.StepIndex, _, _ = k.graph.Lookup(ctx, subj, PredLogStepIndex)
+		entry.Timestamp, _, _ = k.graph.Lookup(ctx, subj, PredLogTimestamp)
+		entry.Session, _, _ = k.graph.Lookup(ctx, subj, PredLogSession)
+		entry.Result, _, _ = k.graph.Lookup(ctx, subj, PredLogResult)
+		entries = append(entries, entry)
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Timestamp < entries[j].Timestamp
+	})
+	return entries, nil
+}
+
+func logSubject(nodeTitle string) string {
+	ts := time.Now().UTC().Format("20060102T150405")
+	b := make([]byte, 4)
+	rand.Read(b)
+	return fmt.Sprintf("log:%s:%s:%x", ts, nodeTitle, b)
+}

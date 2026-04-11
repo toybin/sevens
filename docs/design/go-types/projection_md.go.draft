@@ -1,0 +1,173 @@
+// Package md implements the Projection contract for Markdown files.
+//
+// This package owns:
+// - Markdown parsing (file -> parsed nodes -> triples)
+// - Markdown rendering (triples -> file content)
+// - Block identity tracking (fuzzy matching across edits)
+// - Frontmatter handling
+// - Git operations (version control of projected files)
+// - File watching (future: detect external edits)
+// - DSL extensions (future: typed property lists)
+//
+// Conceptually this is everything in the current internal/graph that
+// relates to files + sync, plus git.go from internal/apply.
+package md
+
+import (
+	"context"
+	"database/sql"
+
+	"sevens/internal/kb"
+	"sevens/internal/projection"
+)
+
+// MarkdownProjection implements projection.Projection for markdown files.
+type MarkdownProjection struct {
+	kb   *kb.KB
+	// db kept for now since sync does bulk triple operations
+	// that may bypass kb's per-node methods for performance.
+	db   *sql.DB
+}
+
+// New creates a markdown projection backed by the given KB.
+func New(kb *kb.KB, db *sql.DB) *MarkdownProjection {
+	return &MarkdownProjection{kb: kb, db: db}
+}
+
+// --- Projection interface implementation ---
+
+func (m *MarkdownProjection) Sync(ctx context.Context, root string) (*projection.SyncResult, error) {
+	// 1. ScanFiles: find all .md files under root
+	// 2. ParseAllFiles: extract frontmatter, content, blocks
+	// 3. Reconcile: diff against current graph state
+	//    - On conflict: file wins, reconstruct to last reconcilable point
+	// 4. Write triples to graph via kb (or direct store for performance)
+	// 5. Return summary
+	panic("TODO")
+}
+
+func (m *MarkdownProjection) Write(ctx context.Context, root, nodeSubject string) error {
+	// 1. Read node from graph via kb
+	// 2. Render to markdown (frontmatter + body)
+	// 3. Write file to disk
+	panic("TODO")
+}
+
+func (m *MarkdownProjection) WriteAll(ctx context.Context, root string) error {
+	panic("TODO")
+}
+
+func (m *MarkdownProjection) ApplyOps(ctx context.Context, root string, ops []projection.FileOp) (*projection.ApplyResult, error) {
+	// Execute file operations: create new .md files, edit existing ones.
+	// This is the current apply.ExecuteOps, moved here.
+	//
+	// For creates: generate frontmatter, write file.
+	// For edits: exact string replacement with fuzzy fallback.
+	panic("TODO")
+}
+
+func (m *MarkdownProjection) Commit(ctx context.Context, root, message string) (string, error) {
+	// Git commit. This is apply.CommitFiles / apply.CommitAll, moved here.
+	// Git is part of the markdown projection, not a separate concept.
+	panic("TODO")
+}
+
+func (m *MarkdownProjection) Revert(ctx context.Context, root, commitRef string) error {
+	// Git revert. This is apply.RevertCommit, moved here.
+	panic("TODO")
+}
+
+// --- Markdown-specific types ---
+
+// ParsedNode is a fully parsed markdown file.
+// Equivalent to graph.ParsedNode in the current code.
+type ParsedNode struct {
+	Title        string
+	Parent       *string
+	FilePath     string
+	Content      string
+	CrossRefs    []string
+	SiblingRole  string
+	IncludeGroup bool
+	Blocks       []ParsedBlock
+}
+
+// ParsedBlock is a structural unit within a node's body.
+// Equivalent to graph.ParsedBlock in the current code.
+type ParsedBlock struct {
+	Path         string
+	Kind         string // "heading", "paragraph", "list-item", "task"
+	Text         string
+	Level        int
+	Signifier    string
+	Tags         []string
+	HeadingChain []string
+	AnchorHashes []string
+	TextHash     uint64
+	ScopeHash    uint64
+	TagHash      uint64
+	AnchorCount  uint8
+	Anchors      [4]uint64
+}
+
+// --- Markdown-specific operations ---
+
+// ScanFiles returns all .md file paths under root, skipping .git.
+func ScanFiles(root string) ([]string, error) {
+	panic("TODO")
+}
+
+// ParseAllFiles reads and parses each file into ParsedNodes.
+func ParseAllFiles(files []string) ([]ParsedNode, []string, error) {
+	panic("TODO")
+}
+
+// --- Block identity tracking ---
+// The fuzzy matching machinery: shingle anchors, text hashes,
+// scored candidate resolution. This is entirely format-specific --
+// a webapp projection wouldn't need any of this.
+
+// DiffBlocks compares two block lists and classifies changes.
+func DiffBlocks(old, new []ParsedBlock) *BlockDiff {
+	panic("TODO")
+}
+
+// BlockDiff classifies how blocks changed between two parses.
+type BlockDiff struct {
+	Unchanged    []BlockChange
+	Edited       []BlockChange
+	ScopeChanged []BlockChange
+	Reordered    []BlockChange
+	Inserted     []string
+	Deleted      []string
+}
+
+// BlockChange is a matched pair of old/new block paths.
+type BlockChange struct {
+	OldPath string
+	NewPath string
+}
+
+// --- Git operations ---
+// These are part of the markdown projection because git tracks
+// the projected files, not the graph.
+
+// IsGitRepo checks if root is a git repository.
+func IsGitRepo(root string) bool {
+	panic("TODO")
+}
+
+// CommitAll stages and commits all changes in root.
+func CommitAll(root, message string) (string, error) {
+	panic("TODO")
+}
+
+// CommitFiles commits specific files.
+func CommitFiles(root, message string, files []string) (string, error) {
+	panic("TODO")
+}
+
+// RevertCommit reverts a specific commit.
+func RevertCommit(root, hash string) (string, error) {
+	panic("TODO")
+}

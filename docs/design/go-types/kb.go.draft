@@ -1,0 +1,319 @@
+// Package kb is Layer 3: the sevens knowledge base.
+//
+// This package imposes the PKM domain model onto a graph of triples.
+// It defines what a "node" is, what "parent" means, how subjects are
+// constructed, and what structural invariants hold. It also owns
+// session/focus state and log entry predicates.
+//
+// Everything above this layer (functions, projection, CLI) depends
+// on kb for the domain vocabulary.
+package kb
+
+import (
+	"context"
+	"crypto/sha1"
+	"fmt"
+
+	"sevens/internal/graphops"
+)
+
+// --- Predicate vocabulary ---
+//
+// These constants define the sevens predicate vocabulary. They're the
+// "morphism labels" from the concept doc. Each one gets registered
+// with graphops.Graph as a PredicateSpec during initialization.
+//
+// Go idiom: constants are grouped by namespace. This is the single
+// place where predicate strings are defined. No string literals for
+// predicates anywhere else in the codebase.
+
+// Node predicates
+const (
+	PredNodeTitle     = "node/title"
+	PredNodeParent    = "node/parent"
+	PredNodeContent   = "node/content"
+	PredNodeFile      = "node/file"
+	PredNodeRoot      = "node/root"
+	PredNodeCharCount = "node/char-count"
+	PredNodeLink      = "node/link"
+	PredNodeRole      = "node/role"
+)
+
+// Block predicates (same entity, different namespace -- the namespace
+// labels the composition role, per the concept doc discussion)
+const (
+	PredBlockNode    = "block/node"
+	PredBlockRoot    = "block/root"
+	PredBlockContent = "block/content"
+	PredBlockScope   = "block/scope"
+	PredBlockKind    = "block/kind"
+	PredBlockPath    = "block/path"
+)
+
+// Session predicates
+const (
+	PredSessionFocus   = "session/focus"
+	PredSessionInclude = "session/include"
+	PredSessionExclude = "session/exclude"
+	PredSessionStarted = "session/started"
+	PredSessionEnded   = "session/ended"
+)
+
+// Log predicates
+const (
+	PredLogFunction  = "log/function"
+	PredLogNode      = "log/node"
+	PredLogStep      = "log/step"
+	PredLogTimestamp  = "log/timestamp"
+	PredLogSession   = "log/session"
+	PredLogResult    = "log/result"
+	PredLogStepIndex = "log/step-index"
+	PredLogEvent     = "log/event"
+	PredLogRoot      = "log/root"
+)
+
+// --- Subject identity ---
+
+// NodeSubject computes the canonical subject string for a node.
+// Format: node:<6-byte-sha1-of-root>:<title>
+//
+// Key property: constructable from (root, title) without querying
+// the graph. You can compute a subject and assert triples about it
+// without looking anything up first.
+func NodeSubject(root, title string) string {
+	h := sha1.Sum([]byte(root))
+	return fmt.Sprintf("node:%x:%s", h[:6], title)
+}
+
+// BlockSubject computes the canonical subject string for a block.
+// Format: block:<6-byte-sha1-of-root>:<nodeTitle>:<path>
+func BlockSubject(root, nodeTitle, path string) string {
+	h := sha1.Sum([]byte(root))
+	return fmt.Sprintf("block:%x:%s:%s", h[:6], nodeTitle, path)
+}
+
+// --- Knowledge Base ---
+
+// KB is the sevens knowledge base. It wraps a graphops.Graph with
+// the PKM domain model: subject identity, predicate vocabulary,
+// structural queries, and session/log operations.
+type KB struct {
+	graph *graphops.Graph
+}
+
+// New creates a KB backed by the given graph. Registers all sevens
+// predicate specs with the graph layer.
+func New(graph *graphops.Graph) *KB {
+	// Register the predicate vocabulary with Layer 2.
+	// This is where the concept doc's "predicate vocabulary" section
+	// becomes operational.
+	graph.RegisterPredicate(graphops.PredicateSpec{
+		Name: PredNodeParent, Multiplicity: graphops.Functional,
+		Inverse: "children",
+	})
+	graph.RegisterPredicate(graphops.PredicateSpec{
+		Name: PredNodeTitle, Multiplicity: graphops.Functional,
+	})
+	graph.RegisterPredicate(graphops.PredicateSpec{
+		Name: PredNodeContent, Multiplicity: graphops.Functional,
+	})
+	graph.RegisterPredicate(graphops.PredicateSpec{
+		Name: PredNodeFile, Multiplicity: graphops.Functional,
+	})
+	graph.RegisterPredicate(graphops.PredicateSpec{
+		Name: PredNodeRoot, Multiplicity: graphops.Functional,
+	})
+	graph.RegisterPredicate(graphops.PredicateSpec{
+		Name: PredNodeCharCount, Multiplicity: graphops.Functional,
+	})
+	graph.RegisterPredicate(graphops.PredicateSpec{
+		Name: PredNodeLink, Multiplicity: graphops.Relational,
+	})
+	graph.RegisterPredicate(graphops.PredicateSpec{
+		Name: PredNodeRole, Multiplicity: graphops.Relational,
+	})
+	graph.RegisterPredicate(graphops.PredicateSpec{
+		Name: PredBlockNode, Multiplicity: graphops.Functional,
+	})
+	// ... remaining predicates registered similarly
+
+	return &KB{graph: graph}
+}
+
+// --- Node operations ---
+
+// CreateNode creates a node with the given title, content, and optional parent.
+// Returns the computed subject.
+func (k *KB) CreateNode(ctx context.Context, root, title, content string, parent *string) (string, error) {
+	subject := NodeSubject(root, title)
+
+	// Assert the pattern of triples that constitutes a node.
+	// This is "createNode" from the concept doc -- asserting a specific
+	// pattern of triples, not creating a "node object."
+	k.graph.Set(ctx, subject, PredNodeTitle, title)
+	k.graph.Set(ctx, subject, PredNodeRoot, root)
+	k.graph.Set(ctx, subject, PredNodeContent, content)
+	k.graph.Set(ctx, subject, PredNodeCharCount, fmt.Sprintf("%d", len(content)))
+
+	if parent != nil {
+		parentSubject := NodeSubject(root, *parent)
+		k.graph.Set(ctx, subject, PredNodeParent, parentSubject)
+	}
+
+	return subject, nil
+}
+
+// SetContent updates a node's content and char count.
+func (k *KB) SetContent(ctx context.Context, root, title, content string) error {
+	subject := NodeSubject(root, title)
+	k.graph.Set(ctx, subject, PredNodeContent, content)
+	k.graph.Set(ctx, subject, PredNodeCharCount, fmt.Sprintf("%d", len(content)))
+	return nil
+}
+
+// LinkNodes creates a cross-reference between two nodes.
+func (k *KB) LinkNodes(ctx context.Context, root, sourceTitle, targetTitle string) error {
+	src := NodeSubject(root, sourceTitle)
+	tgt := NodeSubject(root, targetTitle)
+	// node/link is relational, so use Assert (additive), not Set (replacing)
+	return k.graph.Store().Assert(ctx, triple.Triple{
+		Subject: src, Predicate: PredNodeLink, Object: tgt,
+	})
+}
+
+// --- Queries ---
+//
+// These compose Layer 2 path operations with the predicate vocabulary.
+// "parent forward" becomes Compose(subject, [{PredNodeParent, false}]).
+// "siblings" becomes Compose(subject, [{PredNodeParent, false}, {PredNodeParent, true}])
+// minus self.
+
+// WalkContext is the full local context of a node.
+// Equivalent to WalkNode in the current graph package.
+type WalkContext struct {
+	Subject      string
+	Title        string
+	Content      string
+	Parent       *string
+	Children     []string
+	Siblings     []string
+	CrossRefs    []string
+	ChildRoles   map[string]string
+	SiblingRoles map[string]string
+	Role         string
+}
+
+// Walk returns the full local context of a node: parent, children,
+// siblings, cross-references, roles.
+func (k *KB) Walk(ctx context.Context, root, title string) (*WalkContext, error) {
+	subject := NodeSubject(root, title)
+
+	// Each of these is a composed path query through Layer 2:
+	// parent:   [node/parent]
+	// children: [node/parent~]  (inverse)
+	// siblings: [node/parent, node/parent~] minus self
+	// links:    [node/link] forward + [node/link] inverse
+
+	panic("TODO: compose paths via k.graph.Compose")
+}
+
+// OverviewNode is one node's metadata in a full-graph overview.
+type OverviewNode struct {
+	Title      string
+	Parent     *string
+	Children   []string
+	ChildCount int
+	CrossRefs  []string
+	CharCount  int
+}
+
+// Overview returns the full tree structure for a root.
+func (k *KB) Overview(ctx context.Context, root string) ([]OverviewNode, error) {
+	panic("TODO")
+}
+
+// Children returns a node's children (compose: node/parent inverse).
+func (k *KB) Children(ctx context.Context, root, title string) ([]string, error) {
+	subject := NodeSubject(root, title)
+	return k.graph.Compose(ctx, subject, graphops.ParsePath([]string{PredNodeParent + "~"}))
+}
+
+// Parent returns a node's parent (lookup: node/parent forward).
+func (k *KB) Parent(ctx context.Context, root, title string) (*string, error) {
+	subject := NodeSubject(root, title)
+	parent, ok, err := k.graph.Lookup(ctx, subject, PredNodeParent)
+	if err != nil || !ok {
+		return nil, err
+	}
+	// Resolve parent subject back to title
+	parentTitle, _, err := k.graph.Lookup(ctx, parent, PredNodeTitle)
+	if err != nil {
+		return nil, err
+	}
+	return &parentTitle, nil
+}
+
+// Siblings returns a node's siblings (compose: parent forward, parent inverse, minus self).
+func (k *KB) Siblings(ctx context.Context, root, title string) ([]string, error) {
+	subject := NodeSubject(root, title)
+	path := graphops.ParsePath([]string{PredNodeParent, PredNodeParent + "~"})
+	results, err := k.graph.Compose(ctx, subject, path)
+	if err != nil {
+		return nil, err
+	}
+	// Remove self
+	filtered := make([]string, 0, len(results))
+	for _, r := range results {
+		if r != subject {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered, nil
+}
+
+// --- Validation ---
+
+// Violation describes a structural problem in the knowledge base.
+type Violation struct {
+	Kind    string // "orphan", "overflow", "overlength", "missing-parent", "cycle"
+	Subject string
+	Detail  string
+}
+
+// Validate checks structural invariants and returns violations.
+func (k *KB) Validate(ctx context.Context, root string, maxChildren, maxContentLength int) ([]Violation, error) {
+	panic("TODO")
+}
+
+// --- Session ---
+
+// SetFocus sets the active focus for a session.
+func (k *KB) SetFocus(ctx context.Context, sessionSubject, nodeSubject string) error {
+	return k.graph.Set(ctx, sessionSubject, PredSessionFocus, nodeSubject)
+}
+
+// --- Logging ---
+
+// LogEntry records a function application or pipeline transition.
+type LogEntry struct {
+	Subject   string
+	Event     string
+	Root      string
+	Function  string
+	Node      string
+	Step      string
+	StepIndex int
+	Timestamp string
+	Session   string
+	Result    string
+}
+
+// AppendLog writes a log entry as triples.
+func (k *KB) AppendLog(ctx context.Context, entry LogEntry) error {
+	panic("TODO: assert triples for each log/* predicate")
+}
+
+// ReadLog returns log entries for a node, ordered by timestamp.
+func (k *KB) ReadLog(ctx context.Context, root, nodeTitle string) ([]LogEntry, error) {
+	panic("TODO")
+}

@@ -1,0 +1,73 @@
+// Package projection defines the contract that all presentational
+// surfaces must satisfy. It's the natural transformation between
+// graph state and human-editable forms.
+//
+// This package contains only the interface and shared types.
+// Implementations live in sub-packages (e.g., projection/md).
+package projection
+
+import (
+	"context"
+)
+
+// Projection is the contract for a presentational surface.
+// Transparent to the user -- they edit files, not projections.
+//
+// Go idiom: this is one of the few places where we define the
+// interface in the same package as the concept, because the
+// interface IS the concept. There's no concrete Projection type
+// in this package -- only implementations in sub-packages.
+type Projection interface {
+	// Sync reads the presentational surface, parses everything,
+	// reconciles against current graph state, and applies changes.
+	// This is what `sevens sync` calls.
+	Sync(ctx context.Context, root string) (*SyncResult, error)
+
+	// Write renders a node from graph state and writes it to the
+	// presentational surface. Graph -> presentation direction.
+	Write(ctx context.Context, root, nodeSubject string) error
+
+	// WriteAll renders all nodes in a root to the presentational surface.
+	WriteAll(ctx context.Context, root string) error
+
+	// ApplyOps executes file operations (creates and edits) against
+	// the presentational surface. This is how function results
+	// become visible to the user.
+	ApplyOps(ctx context.Context, root string, ops []FileOp) (*ApplyResult, error)
+
+	// Commit records the current state of the presentational surface
+	// in its version control system (if any). For markdown, this is
+	// a git commit. For a webapp, this might be a no-op.
+	Commit(ctx context.Context, root, message string) (string, error)
+
+	// Revert undoes a previous commit. Returns error if the surface
+	// doesn't support revert.
+	Revert(ctx context.Context, root, commitRef string) error
+}
+
+// FileOp is imported from function package -- keeping it here as
+// a type alias to avoid the projection depending on function.
+// In practice, this might be a shared types package.
+type FileOp struct {
+	Action  string
+	Title   string
+	Parent  string
+	File    string
+	OldText string
+	NewText string
+	Content string
+	Extra   map[string]string
+}
+
+// SyncResult summarizes what changed during a sync operation.
+type SyncResult struct {
+	NodesScanned  int
+	TriplesWritten int
+	Errors         []string
+}
+
+// ApplyResult summarizes file operations applied.
+type ApplyResult struct {
+	FilesCreated []string
+	FilesEdited  []string
+}

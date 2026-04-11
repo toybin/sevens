@@ -1,0 +1,110 @@
+// Package triple is Layer 1: the bare triple store.
+//
+// This package knows nothing about nodes, blocks, predicates, or sevens.
+// It stores and retrieves (subject, predicate, object) string triples.
+// All domain meaning is imposed by packages above.
+//
+// Design note: the entire API is methods on a Store struct rather than
+// free functions taking *sql.DB. This gives us a place to hang
+// configuration (like the DB handle) and makes it easy to swap
+// implementations for testing.
+package triple
+
+import (
+	"context"
+	"database/sql"
+)
+
+// Triple is a single fact: (subject, predicate, object).
+// All three fields are plain strings. No type system or namespacing
+// is enforced at this level.
+type Triple struct {
+	Subject   string
+	Predicate string
+	Object    string
+}
+
+// Store is the triple store. It wraps a SQL database and provides
+// CRUD operations on triples.
+//
+// Go idiom: Store is a concrete type, not an interface. Callers that
+// need to mock it for testing can define their own interface with the
+// methods they use -- Go's implicit interface satisfaction means Store
+// will satisfy it without knowing about it. This is called
+// "accept interfaces, return structs."
+type Store struct {
+	db *sql.DB
+}
+
+// New opens or creates a triple store backed by the given database.
+// It initializes the schema (table + indexes) if not present.
+func New(db *sql.DB) (*Store, error) {
+	// InitSchema creates the triples table and indexes if they
+	// don't exist. Idempotent.
+	if err := initSchema(db); err != nil {
+		return nil, err
+	}
+	return &Store{db: db}, nil
+}
+
+// Assert adds a triple if not already present. Idempotent.
+// This is the fundamental write operation.
+func (s *Store) Assert(ctx context.Context, t Triple) error {
+	// INSERT OR IGNORE: if the exact (s,p,o) tuple exists, no-op.
+	// This differs from the current code which uses INSERT OR REPLACE
+	// (same effect for unique 3-tuples, but IGNORE is more precise
+	// about intent).
+	panic("TODO")
+}
+
+// AssertBatch adds multiple triples in a single transaction.
+// Each triple is individually idempotent.
+func (s *Store) AssertBatch(ctx context.Context, triples []Triple) error {
+	panic("TODO")
+}
+
+// Retract removes a specific triple. No error if it doesn't exist.
+func (s *Store) Retract(ctx context.Context, t Triple) error {
+	panic("TODO")
+}
+
+// RetractBySubject removes all triples with the given subject.
+func (s *Store) RetractBySubject(ctx context.Context, subject string) error {
+	panic("TODO")
+}
+
+// --- Queries ---
+
+// BySubject returns all triples for a subject.
+func (s *Store) BySubject(ctx context.Context, subject string) ([]Triple, error) {
+	panic("TODO")
+}
+
+// BySubjectPredicate returns all objects for a (subject, predicate) pair.
+func (s *Store) BySubjectPredicate(ctx context.Context, subject, predicate string) ([]string, error) {
+	panic("TODO")
+}
+
+// ByPredicateObject returns all subjects for a (predicate, object) pair.
+// This is the reverse lookup.
+func (s *Store) ByPredicateObject(ctx context.Context, predicate, object string) ([]string, error) {
+	panic("TODO")
+}
+
+// ByPredicate returns all triples with a given predicate.
+func (s *Store) ByPredicate(ctx context.Context, predicate string) ([]Triple, error) {
+	panic("TODO")
+}
+
+// Search finds subjects whose object for the given predicate contains
+// the substring. Case-insensitive.
+func (s *Store) Search(ctx context.Context, predicate, substring string) ([]string, error) {
+	panic("TODO")
+}
+
+// RawQuery executes arbitrary SQL and returns results as string rows.
+// First row is column headers. This is the escape hatch for advanced
+// queries (e.g., PRQL-compiled).
+func (s *Store) RawQuery(ctx context.Context, query string, args ...any) ([][]string, error) {
+	panic("TODO")
+}
