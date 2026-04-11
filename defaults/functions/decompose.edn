@@ -1,0 +1,10 @@
+{:name "decompose"
+ :description "Break a dense node into 5-7 children with scaffolding questions"
+ :steps
+ [{:name "suggest"
+   :input "node"
+   :output "suggestions"
+   :gate "approve"}
+  {:name "generate"
+   :input "suggestions"
+   :output "ops"}]}

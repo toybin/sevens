@@ -1,0 +1,11 @@
+{:name "trim"
+ :description "Remove content that doesn't belong — redundancy with children, scope drift, padding"
+ :context
+ [{:path ["node/parent~"]
+   :with ["node/content"]
+   :as "children"}
+  {:path ["node/parent"]
+   :with ["node/content"]
+   :as "parent"}]
+ :input "node"
+ :output "ops"}

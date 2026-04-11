@@ -1,0 +1,15 @@
+{:name "contradict"
+ :description "Find nodes in the neighborhood that directly conflict with this node's claims — not potential counterarguments, actual inconsistencies with what you already wrote"
+ :context
+ [{:path ["node/parent"]
+   :with ["node/content"]
+   :as "parent"}
+  {:path ["node/parent" "node/parent~"]
+   :exclude-self true
+   :with ["node/content"]
+   :as "siblings"}
+  {:path ["node/parent~"]
+   :with ["node/content"]
+   :as "children"}]
+ :input "node"
+ :output "text"}

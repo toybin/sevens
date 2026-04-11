@@ -1,0 +1,11 @@
+{:name "inbox-capture"
+ :description "Create a quick capture note under inbox"
+ :mode "create-node"
+ :title-pattern "{{title}}"
+ :draft-title-pattern "Capture {{date}} {{time}}"
+ :parent-template "inbox-root"
+ :target {:parent "inbox"}
+ :params [{:name "title" :required true}
+          {:name "summary"}]
+ :draft {:when-missing-params true}
+ :commit-message "sevens: capture {{title}}"}

@@ -1,0 +1,13 @@
+; Draft schema location for Markdown orthography tokens.
+; Not yet loaded by runtime code.
+;
+; Suggested shape:
+; [{:id "token:#"
+;   :token "#"
+;   :kind :signifier
+;   :contexts [:inline :property-slot]}
+;  {:id "token::"
+;   :token "::"
+;   :kind :signifier
+;   :contexts [:inline :property-slot]}]
+[]

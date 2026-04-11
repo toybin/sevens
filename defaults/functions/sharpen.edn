@@ -1,0 +1,8 @@
+{:name "sharpen"
+ :description "Rewrite a node's core claim to be maximally precise — not shorter or longer, just clearer"
+ :context
+ [{:path ["node/parent"]
+   :with ["node/content"]
+   :as "parent"}]
+ :input "node"
+ :output "ops"}

@@ -1,0 +1,9 @@
+; Draft schema location for semantic keys bound from orthographic tokens.
+; Not yet loaded by runtime code.
+;
+; Suggested shape:
+; [{:id "sem:status"
+;   :label "status"
+;   :emits "meta/status"
+;   :value-model "sm:todo-status"}]
+[]

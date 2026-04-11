@@ -1,0 +1,3 @@
+{:path "~/tools/sevens/testdata"
+ :alias "test"
+ :max-chars 2000}

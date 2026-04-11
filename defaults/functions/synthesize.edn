@@ -1,0 +1,15 @@
+{:name "synthesize"
+ :description "Detect non-obvious connections and patterns across a node's neighborhood"
+ :context
+ [{:path ["node/parent~"]
+   :with ["node/content"]
+   :as "children"}
+  {:path ["node/parent" "node/parent~"]
+   :exclude-self true
+   :with ["node/content"]
+   :as "siblings"}
+  {:path ["node/parent"]
+   :with ["node/content"]
+   :as "parent"}]
+ :input "node"
+ :output "suggestions"}

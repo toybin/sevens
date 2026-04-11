@@ -1,0 +1,7 @@
+{:name "summarize"
+ :description "Condense verbose content into a concise summary"
+ :agent {:persona "editor"
+         :model "fast"
+         :context-policy "minimal"}
+ :input "node"
+ :output "ops"}

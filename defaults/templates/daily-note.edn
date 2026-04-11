@@ -1,0 +1,9 @@
+{:name "daily-note"
+ :description "Create or scaffold today's daily note under inbox"
+ :mode "create-node"
+ :title-pattern "{{date}}"
+ :parent-template "inbox-root"
+ :target {:parent "inbox"}
+ :params [{:name "summary"}]
+ :draft {:when-missing-params true}
+ :commit-message "sevens: daily note {{date}}"}

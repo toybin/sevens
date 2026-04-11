@@ -1,0 +1,8 @@
+{:name "thesis"
+ :description "Infer the implicit argument or thesis from a node and its children — what is this subtree trying to say?"
+ :context
+ [{:path ["node/parent~"]
+   :with ["node/content"]
+   :as "children"}]
+ :input "node"
+ :output "text"}

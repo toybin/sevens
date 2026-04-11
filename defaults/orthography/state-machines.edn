@@ -1,0 +1,9 @@
+; Draft schema location for enum-like and transition-bearing semantic objects.
+; Not yet loaded by runtime code.
+;
+; Suggested shape:
+; [{:id "sm:todo-status"
+;   :states [{:id "state:todo" :aliases [" " "_"]}
+;            {:id "state:done" :aliases ["x" "::done"]}]
+;   :transitions [{:from "state:todo" :to "state:done"}]}]
+[]

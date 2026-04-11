@@ -1,0 +1,8 @@
+{:name "merge"
+ :description "Synthesize children's content back into the parent node"
+ :context
+ [{:path ["node/parent~"]
+   :with ["node/content"]
+   :as "children"}]
+ :input "node"
+ :output "ops"}

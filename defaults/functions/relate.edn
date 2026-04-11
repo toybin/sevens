@@ -1,0 +1,15 @@
+{:name "relate"
+ :description "Propose wiki links from node content to other nodes in the graph"
+ :context
+ [{:path ["node/parent" "node/parent~"]
+   :exclude-self true
+   :with ["node/content"]
+   :as "siblings"}
+  {:path ["node/parent"]
+   :with ["node/content"]
+   :as "parent"}]
+ :agent {:exploration "closed"
+         :allow-file-reads false
+         :read-only true}
+ :input "node"
+ :output "ops"}

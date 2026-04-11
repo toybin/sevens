@@ -1,0 +1,7 @@
+{:name "append-note"
+ :description "Append a timestamped note to a target node"
+ :mode "append-node"
+ :target {:node "."}
+ :params [{:name "text" :required true}]
+ :draft {:when-missing-params true}
+ :commit-message "sevens: append note via template {{template-name}}"}

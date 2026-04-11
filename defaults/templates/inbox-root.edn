@@ -1,0 +1,5 @@
+{:name "inbox-root"
+ :description "Ensure the inbox root node exists"
+ :mode "create-node"
+ :title-pattern "inbox"
+ :commit-message "sevens: create inbox root"}

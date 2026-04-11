@@ -1,0 +1,12 @@
+{:name "distill"
+ :description "Extract actionable insights from a discussion into concrete edits or new nodes"
+ :context
+ [{:path ["node/parent"]
+   :with ["node/content"]
+   :as "parent"}
+  {:path ["node/parent" "node/parent~"]
+   :exclude-self true
+   :with ["node/content"]
+   :as "siblings"}]
+ :input "node"
+ :output "ops"}

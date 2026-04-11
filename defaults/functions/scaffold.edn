@@ -1,0 +1,6 @@
+{:name "scaffold"
+ :description "Build section structure and placeholder prompts without filling in content"
+ :requires [{:role "parent" :optional true}
+            {:role "children"}]
+ :input "node"
+ :output "ops"}

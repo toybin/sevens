@@ -1,0 +1,9 @@
+; Draft schema location for value parser definitions.
+; Not yet loaded by runtime code.
+;
+; Suggested shape:
+; [{:id "parser:date"
+;   :kind :date}
+;  {:id "parser:duration"
+;   :kind :duration}]
+[]

@@ -1,0 +1,12 @@
+{:name "bridge"
+ :description "Write a connecting narrative between a node and its siblings — what links them that isn't said"
+ :context
+ [{:path ["node/parent" "node/parent~"]
+   :exclude-self true
+   :with ["node/content"]
+   :as "siblings"}
+  {:path ["node/parent"]
+   :with ["node/content"]
+   :as "parent"}]
+ :input "node"
+ :output "ops"}

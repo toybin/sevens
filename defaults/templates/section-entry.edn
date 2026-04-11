@@ -1,0 +1,11 @@
+{:name "section-entry"
+ :description "Insert a bullet under a specific heading in a target node"
+ :mode "insert-block"
+ :target {:node "."}
+ :placement {:kind "under-heading"
+             :heading "{{heading}}"
+             :create-if-missing true}
+ :params [{:name "heading" :required true}
+          {:name "text" :required true}]
+ :draft {:when-missing-params true}
+ :commit-message "sevens: insert section entry {{heading}}"}
