@@ -22,6 +22,7 @@ import (
 	"sevens/internal/function"
 	"sevens/internal/graph"
 	"sevens/internal/kb"
+	"sevens/internal/projection"
 	projmd "sevens/internal/projection/md"
 	"sevens/internal/store"
 	"sevens/internal/ui"
@@ -228,7 +229,7 @@ func initCmd() *cobra.Command {
 			}
 			fmt.Fprintf(os.Stderr, "%s Created %s\n", ui.Success.Render("[init]"), configPath)
 
-			if !apply.IsGitRepo(abs) {
+			if !projmd.IsGitRepo(abs) {
 				out, err := runGitInit(abs)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "%s git init failed: %v\n", ui.Success.Render("[init]"), err)
@@ -959,21 +960,22 @@ func extractBlockCmd() *cobra.Command {
 				return err
 			}
 
-			ops := []apply.FileOp{{
+			proj := openProjection(stack)
+			projOps := []projection.FileOp{{
 				Action:  "create",
-				Title:   extracted.Title,
-				Parent:  extracted.ParentTitle,
-				Content: extracted.Content,
+				Title:   newTitle,
+				Parent:  parent,
+				Content: "# " + extracted.Title + "\n\n" + extracted.Content,
 			}}
-			created, _, err := apply.ExecuteOps(ops, resolved, db)
+			projResult, err := proj.ApplyOps(context.Background(), resolved, projOps)
 			if err != nil {
 				return fmt.Errorf("creating node: %w", err)
 			}
-			for _, f := range created {
+			for _, f := range projResult.FilesCreated {
 				fmt.Fprintf(os.Stderr, "%s Created: %s\n", ui.Success.Render("[extract]"), f)
 			}
-			if projmd.IsGitRepo(resolved) && len(created) > 0 {
-				hash, err := projmd.CommitFiles(resolved, fmt.Sprintf("sevens: extract block %s from %q", blockPath, extracted.SourceTitle), created)
+			if projmd.IsGitRepo(resolved) && len(projResult.FilesCreated) > 0 {
+				hash, err := projmd.CommitFiles(resolved, fmt.Sprintf("sevens: extract block %s from %q", blockPath, extracted.SourceTitle), projResult.FilesCreated)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "%s git commit failed: %v\n", ui.Success.Render("[extract]"), err)
 				} else {
