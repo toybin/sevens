@@ -19,6 +19,8 @@ import (
 	"sevens/internal/backend"
 	"sevens/internal/engine"
 	"sevens/internal/graph"
+	"sevens/internal/kb"
+	projmd "sevens/internal/projection/md"
 	"sevens/internal/store"
 	"sevens/internal/ui"
 )
@@ -51,12 +53,21 @@ type REPL struct {
 	discussFileCreated bool     // true if the discussion file was created during this session
 	discussFilePath    string   // absolute path to the discussion file
 	discussCommit      string   // short commit hash if a commit was made during enterDiscussion
+	kbInstance         *kb.KB   // new architecture KB; nil if not provided
 
 	rl *readline.Instance
 }
 
+// Option configures optional REPL dependencies.
+type Option func(*REPL)
+
+// WithKB injects a KB instance for commands that have been migrated to the new architecture.
+func WithKB(k *kb.KB) Option {
+	return func(r *REPL) { r.kbInstance = k }
+}
+
 // New creates a REPL and initialises readline. focusNode may be "".
-func New(db *sql.DB, root string, focusNode string, globalCfg apply.GlobalConfig) (*REPL, error) {
+func New(db *sql.DB, root string, focusNode string, globalCfg apply.GlobalConfig, opts ...Option) (*REPL, error) {
 	// Apply theme from config if set.
 	if globalCfg.Theme != "" {
 		ui.SetTheme(globalCfg.Theme)
@@ -74,6 +85,9 @@ func New(db *sql.DB, root string, focusNode string, globalCfg apply.GlobalConfig
 		root:      root,
 		focus:     focusNode,
 		globalCfg: globalCfg,
+	}
+	for _, o := range opts {
+		o(r)
 	}
 
 	histPath, _ := historyFile() // non-fatal if unavailable
@@ -612,10 +626,10 @@ func (r *REPL) doAccept(nodeTitle, withFeedback string, susSubjectOverride ...st
 	engine.ResolveSuspension(r.db, susSubject, "accepted")
 
 	commitHash := ""
-	if apply.IsGitRepo(r.root) {
+	if projmd.IsGitRepo(r.root) {
 		allFiles := append(created, edited...)
 		if len(allFiles) > 0 {
-			h, cerr := apply.CommitFiles(r.root,
+			h, cerr := projmd.CommitFiles(r.root,
 				fmt.Sprintf("sevens: apply %s to %q", sus.Function, nodeTitle), allFiles)
 			if cerr != nil {
 				fmt.Fprintf(os.Stderr, "%s git commit failed: %v\n", ui.Warning.Render("[warn]"), cerr)
@@ -694,7 +708,7 @@ func (r *REPL) doReject(nodeTitle string, susSubjectOverride ...string) error {
 // ─── Revert ──────────────────────────────────────────────────────────────────
 
 func (r *REPL) doRevert(nodeTitle string) error {
-	if !apply.IsGitRepo(r.root) {
+	if !projmd.IsGitRepo(r.root) {
 		return fmt.Errorf("not a git repo — cannot revert")
 	}
 
@@ -813,8 +827,8 @@ func (r *REPL) endNote() error {
 
 	// Commit.
 	commitHash := ""
-	if apply.IsGitRepo(r.root) {
-		h, cerr := apply.CommitFiles(r.root, fmt.Sprintf("sevens: note on %q", focus), []string{filePath})
+	if projmd.IsGitRepo(r.root) {
+		h, cerr := projmd.CommitFiles(r.root, fmt.Sprintf("sevens: note on %q", focus), []string{filePath})
 		if cerr != nil {
 			fmt.Fprintf(os.Stderr, "%s git commit: %v\n", ui.Warning.Render("[warn]"), cerr)
 		} else {
@@ -865,8 +879,8 @@ func (r *REPL) handleNew(title string) error {
 	}
 
 	// Commit.
-	if apply.IsGitRepo(r.root) {
-		h, cerr := apply.CommitFiles(r.root, fmt.Sprintf("sevens: new %q under %q", title, parent), []string{path})
+	if projmd.IsGitRepo(r.root) {
+		h, cerr := projmd.CommitFiles(r.root, fmt.Sprintf("sevens: new %q under %q", title, parent), []string{path})
 		if cerr != nil {
 			fmt.Fprintf(os.Stderr, "%s git commit: %v\n", ui.Warning.Render("[warn]"), cerr)
 		} else {

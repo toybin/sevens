@@ -7,6 +7,7 @@ import (
 
 	"sevens/internal/apply"
 	"sevens/internal/graph"
+	projmd "sevens/internal/projection/md"
 	"sevens/internal/ui"
 )
 
@@ -207,8 +208,8 @@ func (r *REPL) handleExtractBlock(tokens []string) error {
 	if err != nil {
 		return fmt.Errorf("creating node: %w", err)
 	}
-	if apply.IsGitRepo(r.root) && len(created) > 0 {
-		h, cerr := apply.CommitFiles(r.root, fmt.Sprintf("sevens: extract block %s from %q", extracted.SourcePath, extracted.SourceTitle), created)
+	if projmd.IsGitRepo(r.root) && len(created) > 0 {
+		h, cerr := projmd.CommitFiles(r.root, fmt.Sprintf("sevens: extract block %s from %q", extracted.SourcePath, extracted.SourceTitle), created)
 		if cerr != nil {
 			fmt.Fprintf(os.Stderr, "%s git commit: %v\n", ui.Warning.Render("[warn]"), cerr)
 		} else {

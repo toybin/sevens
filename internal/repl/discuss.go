@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"sevens/internal/apply"
+	projmd "sevens/internal/projection/md"
 	"sevens/internal/store"
 	"sevens/internal/ui"
 )
@@ -96,8 +97,8 @@ func (r *REPL) enterDiscussion(nonInteractive bool) error {
 	// Enter interactive discussion mode.
 	// Commit the initial discussion file so we have a clean base to revert to.
 	var initialCommit string
-	if apply.IsGitRepo(r.root) && resolvedPath != "" {
-		h, cerr := apply.CommitFiles(r.root,
+	if projmd.IsGitRepo(r.root) && resolvedPath != "" {
+		h, cerr := projmd.CommitFiles(r.root,
 			fmt.Sprintf("sevens: discussion on %q (draft)", focus), []string{resolvedPath})
 		if cerr != nil {
 			fmt.Fprintf(os.Stderr, "%s git commit: %v\n", ui.Warning.Render("[warn]"), cerr)
@@ -195,8 +196,8 @@ func (r *REPL) handleDiscussionInput(line string) error {
 }
 
 func (r *REPL) endDiscussion() error {
-	if apply.IsGitRepo(r.root) && r.discussFilePath != "" {
-		h, err := apply.CommitFiles(r.root,
+	if projmd.IsGitRepo(r.root) && r.discussFilePath != "" {
+		h, err := projmd.CommitFiles(r.root,
 			fmt.Sprintf("sevens: discussion on %q", r.focus), []string{r.discussFilePath})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s git commit: %v\n", ui.Warning.Render("[warn]"), err)
@@ -217,7 +218,7 @@ func (r *REPL) endDiscussion() error {
 
 func (r *REPL) cancelDiscussion() error {
 	// Revert the draft commit if one was made during enterDiscussion.
-	if r.discussCommit != "" && apply.IsGitRepo(r.root) {
+	if r.discussCommit != "" && projmd.IsGitRepo(r.root) {
 		if _, err := apply.RevertCommit(r.root, r.discussCommit); err != nil {
 			fmt.Fprintf(os.Stderr, "%s could not revert draft commit %s: %v\n",
 				ui.Warning.Render("[warn]"), r.discussCommit, err)
@@ -231,7 +232,7 @@ func (r *REPL) cancelDiscussion() error {
 					ui.Warning.Render("[warn]"), err)
 			}
 			// Remove from git index if in a git repo.
-			if apply.IsGitRepo(r.root) {
+			if projmd.IsGitRepo(r.root) {
 				relPath, err := filepath.Rel(r.root, r.discussFilePath)
 				if err == nil {
 					exec.Command("git", "-C", r.root, "rm", "--cached", "--force", relPath).Run()
@@ -239,7 +240,7 @@ func (r *REPL) cancelDiscussion() error {
 			}
 		} else {
 			// File existed before: restore it from git if possible.
-			if apply.IsGitRepo(r.root) {
+			if projmd.IsGitRepo(r.root) {
 				relPath, err := filepath.Rel(r.root, r.discussFilePath)
 				if err == nil {
 					if out, err := exec.Command("git", "-C", r.root, "checkout", "--", relPath).CombinedOutput(); err != nil {

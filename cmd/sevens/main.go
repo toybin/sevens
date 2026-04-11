@@ -18,6 +18,7 @@ import (
 	"sevens/internal/apply"
 	"sevens/internal/backend"
 	"sevens/internal/engine"
+	"sevens/internal/function"
 	"sevens/internal/graph"
 	"sevens/internal/kb"
 	projmd "sevens/internal/projection/md"
@@ -705,13 +706,13 @@ func diffBlocksCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			db, err := openDB()
+			stack, err := openKB()
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer stack.Close()
 
-			output, err := graph.BuildBlockDiff(db, resolved, nodeTitle)
+			output, err := graph.BuildBlockDiff(stack.Store.DB(), resolved, nodeTitle)
 			if err != nil {
 				return err
 			}
@@ -802,13 +803,13 @@ func blocksCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			db, err := openDB()
+			stack, err := openKB()
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer stack.Close()
 
-			output, err := graph.BuildBlockList(db, resolved, nodeTitle)
+			output, err := graph.BuildBlockList(stack.Store.DB(), resolved, nodeTitle)
 			if err != nil {
 				return err
 			}
@@ -869,13 +870,13 @@ func inboxCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			db, err := openDB()
+			stack, err := openKB()
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer stack.Close()
 
-			output, err := graph.BuildInboxOverview(db, resolved, nodeTitle)
+			output, err := graph.BuildInboxOverview(stack.Store.DB(), resolved, nodeTitle)
 			if err != nil {
 				return err
 			}
@@ -940,12 +941,13 @@ func extractBlockCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			db, err := openDB()
+			stack, err := openKB()
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer stack.Close()
 
+			db := stack.Store.DB()
 			extracted, err := graph.PrepareBlockExtraction(db, resolved, sourceTitle, blockPath, newTitle, parent)
 			if err != nil {
 				return err
@@ -964,8 +966,8 @@ func extractBlockCmd() *cobra.Command {
 			for _, f := range created {
 				fmt.Fprintf(os.Stderr, "%s Created: %s\n", ui.Success.Render("[extract]"), f)
 			}
-			if apply.IsGitRepo(resolved) && len(created) > 0 {
-				hash, err := apply.CommitFiles(resolved, fmt.Sprintf("sevens: extract block %s from %q", blockPath, extracted.SourceTitle), created)
+			if projmd.IsGitRepo(resolved) && len(created) > 0 {
+				hash, err := projmd.CommitFiles(resolved, fmt.Sprintf("sevens: extract block %s from %q", blockPath, extracted.SourceTitle), created)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "%s git commit failed: %v\n", ui.Success.Render("[extract]"), err)
 				} else {
@@ -2302,32 +2304,44 @@ func prepareCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			fn, err := apply.LoadFunction(fnName)
+			oldFn, err := apply.LoadFunction(fnName)
 			if err != nil {
 				return fmt.Errorf("loading function: %w", err)
 			}
+			fn := function.ConvertFunction(oldFn)
 
-			db, err := openDB()
+			stack, err := openKB()
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer stack.Close()
 
-			walk, err := graph.BuildWalk(db, resolved, nodeTitle, 1)
-			if err != nil {
-				return fmt.Errorf("building walk: %w", err)
-			}
-
-			globalConfig, err := apply.LoadGlobalConfig()
-			if err != nil {
-				return fmt.Errorf("loading config: %w", err)
-			}
-
+			// Use new context resolution
 			steps := fn.EffectiveSteps()
+			prepSteps := make([]ui.PrepareStep, len(steps))
+			for i, s := range steps {
+				prompt := ""
+				if s.Backend.PromptTemplate != "" {
+					rc, rcErr := function.ResolveContext(context.Background(), stack.KB, resolved, nodeTitle, s, "")
+					if rcErr == nil {
+						prompt = function.RenderPrompt(s.Backend.PromptTemplate, rc)
+					}
+				}
+				prepSteps[i] = ui.PrepareStep{
+					Name: s.Name, Gate: oldFn.EffectiveSteps()[i].Gate, Fn: oldFn.EffectiveSteps()[i].Fn,
+					MapOver: oldFn.EffectiveSteps()[i].MapOver, Output: oldFn.EffectiveSteps()[i].Output, Prompt: prompt,
+				}
+			}
+
+			// Walk the target for context display
+			walkCtx, walkErr := stack.KB.Walk(context.Background(), resolved, nodeTitle)
+			if walkErr != nil {
+				return fmt.Errorf("walking node: %w", walkErr)
+			}
 
 			// Determine what context the function needs
 			needsParent, needsSiblings, needsChildren := false, false, false
-			for _, ps := range fn.Context {
+			for _, ps := range oldFn.Context {
 				switch ps.As {
 				case "parent":
 					needsParent = true
@@ -2337,7 +2351,7 @@ func prepareCmd() *cobra.Command {
 					needsChildren = true
 				}
 			}
-			for _, r := range fn.Requires {
+			for _, r := range oldFn.Requires {
 				switch r.Role {
 				case "parent":
 					needsParent = true
@@ -2348,42 +2362,25 @@ func prepareCmd() *cobra.Command {
 				}
 			}
 
-			// Build resolved steps for the checklist
-			parentStr := ""
-			if walk.Node.Parent != nil {
-				parentStr = *walk.Node.Parent
+			globalConfig, err := apply.LoadGlobalConfig()
+			if err != nil {
+				return fmt.Errorf("loading config: %w", err)
 			}
-			prepSteps := make([]ui.PrepareStep, len(steps))
-			for i, s := range steps {
-				prompt := ""
-				if s.Prompt != "" {
-					prompt = apply.RenderStepPrompt(
-						s.Prompt, nodeTitle, walk.Node.Content,
-						parentStr, walk.Node.Children, "", "",
-					)
-				}
-				prepSteps[i] = ui.PrepareStep{
-					Name: s.Name, Gate: s.Gate, Fn: s.Fn,
-					MapOver: s.MapOver, Output: s.Output, Prompt: prompt,
-				}
-			}
-
 			var allContextFiles []string
 			allContextFiles = append(allContextFiles, globalConfig.ContextFiles...)
-			allContextFiles = append(allContextFiles, fn.ContextFiles...)
-			allContextFiles = append(allContextFiles, walk.Node.ContextFiles...)
+			allContextFiles = append(allContextFiles, oldFn.ContextFiles...)
 
 			fmt.Print(ui.RenderPrepareChecklist(ui.PrepareData{
 				FnName:       fnName,
 				NodeTitle:    nodeTitle,
 				Steps:        prepSteps,
-				Parent:       walk.Node.Parent,
-				Siblings:     walk.Node.Siblings,
-				Children:     walk.Node.Children,
+				Parent:       walkCtx.Parent,
+				Siblings:     walkCtx.Siblings,
+				Children:     walkCtx.Children,
 				NeedsParent:  needsParent,
 				NeedsSibling: needsSiblings,
 				NeedsChild:   needsChildren,
-				CrossWalk:    fn.CrossWalk,
+				CrossWalk:    oldFn.CrossWalk,
 				ContextFiles: allContextFiles,
 			}))
 
@@ -2433,18 +2430,17 @@ func submitCmd() *cobra.Command {
 				return fmt.Errorf("no response provided (use --response or --response-file)")
 			}
 
-			db, err := openDB()
+			stack, err := openKB()
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer stack.Close()
+			db := stack.Store.DB()
 
-			// Determine step name
+			// Determine step name and index
 			if stepName == "" {
 				stepName = "default"
 			}
-
-			// Resolve the step index by loading the function
 			stepIndex := 0
 			if fn, err := apply.LoadFunction(fnName); err == nil {
 				steps := fn.EffectiveSteps()
@@ -2456,58 +2452,92 @@ func submitCmd() *cobra.Command {
 				}
 			}
 
-			// Build log entry
-			entry := apply.LogEntry{
-				Root:      resolved,
-				Function:  fnName,
-				Target:    nodeTitle,
-				Step:      stepName,
-				StepIndex: stepIndex,
-				Timestamp: time.Now().UTC().Format(time.RFC3339),
-				RawOutput: responseText,
-			}
+			// Create a pipeline in Pending state for the submitted result
+			ps := function.NewPipelineStore(stack.Store)
+			p := function.NewPipeline(resolved, fnName, nodeTitle)
+			p.CurrentStep = stepIndex
 
-			// Helper to write a suspension for pending review
-			writeSuspension := func(summary string, ops []apply.FileOp) {
-				engine.WriteSuspension(db, resolved, nodeTitle, nodeTitle, nil, fnName, stepName, "approve", outputType, responseText, stepIndex, summary, ops, "")
-			}
+			// Build the transform result from the submitted response
+			var tfResult function.TransformResult
+			tfResult.Raw = responseText
 
 			switch outputType {
 			case "ops":
-				ops, err := apply.ParseOps(responseText)
-				if err != nil {
-					return fmt.Errorf("parsing ops response: %w", err)
+				ops, parseErr := apply.ParseOps(responseText)
+				if parseErr != nil {
+					return fmt.Errorf("parsing ops response: %w", parseErr)
 				}
-				entry.Event = "suggested"
-				entry.Ops = ops
-				entry.Summary = summarizeOutput("ops", responseText, ops)
-				if err := apply.AppendLogDB(db, entry); err != nil {
-					return fmt.Errorf("logging: %w", err)
+				for _, op := range ops {
+					tfResult.Ops = append(tfResult.Ops, function.FileOp{
+						Action:  op.Action,
+						Title:   op.Title,
+						Parent:  op.Parent,
+						File:    op.File,
+						OldText: op.OldText,
+						NewText: op.NewText,
+						Content: op.Content,
+					})
 				}
-				writeSuspension(entry.Summary, ops)
 
-				fmt.Fprintf(os.Stderr, "[submit] %s/%s → %q\n", fnName, stepName, nodeTitle)
+				// Suspend in Pending phase
+				p.CurrentResult = &tfResult
+				p.Phase = function.PhasePending
+				if err := ps.Save(context.Background(), p); err != nil {
+					return fmt.Errorf("saving pipeline: %w", err)
+				}
+
+				// Also log to old system for backwards compat
+				entry := apply.LogEntry{
+					Root: resolved, Function: fnName, Target: nodeTitle,
+					Step: stepName, StepIndex: stepIndex,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					RawOutput: responseText, Event: "suggested",
+					Ops: ops, Summary: summarizeOutput("ops", responseText, ops),
+				}
+				_ = apply.AppendLogDB(db, entry)
+
+				fmt.Fprintf(os.Stderr, "[submit] %s/%s → %q (pipeline %s)\n", fnName, stepName, nodeTitle, p.ID)
 				for _, op := range ops {
 					fmt.Fprintln(os.Stderr, ui.FormatOp(op.Action, opName(op)))
 				}
 				fmt.Fprintf(os.Stderr, "\nRun `sevens accept %q` to apply.\n", nodeTitle)
 
 			case "suggestions":
-				entry.Event = "suggested"
-				entry.Summary = summarizeOutput("suggestions", responseText, nil)
-				if err := apply.AppendLogDB(db, entry); err != nil {
-					return fmt.Errorf("logging: %w", err)
+				tfResult.IsText = true
+				p.CurrentResult = &tfResult
+				p.Phase = function.PhasePending
+				if err := ps.Save(context.Background(), p); err != nil {
+					return fmt.Errorf("saving pipeline: %w", err)
 				}
-				writeSuspension(entry.Summary, nil)
 
-				fmt.Fprintf(os.Stderr, "[submit] %s/%s → %q (%s)\n", fnName, stepName, nodeTitle, entry.Summary)
+				summary := summarizeOutput("suggestions", responseText, nil)
+				entry := apply.LogEntry{
+					Root: resolved, Function: fnName, Target: nodeTitle,
+					Step: stepName, StepIndex: stepIndex,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					RawOutput: responseText, Event: "suggested", Summary: summary,
+				}
+				_ = apply.AppendLogDB(db, entry)
+
+				fmt.Fprintf(os.Stderr, "[submit] %s/%s → %q (%s, pipeline %s)\n", fnName, stepName, nodeTitle, summary, p.ID)
 				fmt.Fprintf(os.Stderr, "\nRun `sevens accept %q` to approve and continue.\n", nodeTitle)
 
 			case "text":
-				entry.Event = "completed"
-				if err := apply.AppendLogDB(db, entry); err != nil {
-					return fmt.Errorf("logging: %w", err)
+				tfResult.IsText = true
+				p.CurrentResult = &tfResult
+				p.Phase = function.PhaseCompleted
+				if err := ps.Save(context.Background(), p); err != nil {
+					return fmt.Errorf("saving pipeline: %w", err)
 				}
+
+				entry := apply.LogEntry{
+					Root: resolved, Function: fnName, Target: nodeTitle,
+					Step: stepName, StepIndex: stepIndex,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					RawOutput: responseText, Event: "completed",
+				}
+				_ = apply.AppendLogDB(db, entry)
+
 				fmt.Fprintf(os.Stderr, "[submit] %s/%s → %q (completed)\n", fnName, stepName, nodeTitle)
 				fmt.Println(responseText)
 
@@ -2542,8 +2572,8 @@ func instantiateTemplateNode(db *sql.DB, root string, tmpl *apply.NodeTemplate, 
 
 	files := append([]string(nil), result.Created...)
 	files = append(files, result.Edited...)
-	if apply.IsGitRepo(root) && len(files) > 0 {
-		if _, err := apply.CommitFiles(root, result.CommitMessage, files); err != nil {
+	if projmd.IsGitRepo(root) && len(files) > 0 {
+		if _, err := projmd.CommitFiles(root, result.CommitMessage, files); err != nil {
 			fmt.Fprintf(os.Stderr, "%s git commit failed: %v\n", ui.Warning.Render("[warn]"), err)
 		}
 	}
@@ -2648,11 +2678,12 @@ func captureCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("resolving root: %w", err)
 			}
-			db, err := openDB()
+			stack, err := openKB()
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer stack.Close()
+			db := stack.Store.DB()
 
 			varMap := make(map[string]string)
 			for _, v := range vars {
@@ -2718,11 +2749,12 @@ func newCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			db, err := openDB()
+			stack, err := openKB()
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer stack.Close()
+			db := stack.Store.DB()
 
 			// Parse template variables from --set flags
 			varMap := make(map[string]string)
@@ -2782,8 +2814,8 @@ func newCmd() *cobra.Command {
 					fmt.Fprintf(os.Stderr, "%s Created: %s\n", ui.Success.Render("[new]"), f)
 				}
 
-				if apply.IsGitRepo(resolved) && len(created) > 0 {
-					hash, err := apply.CommitFiles(resolved, fmt.Sprintf("sevens: new node %q", title), created)
+				if projmd.IsGitRepo(resolved) && len(created) > 0 {
+					hash, err := projmd.CommitFiles(resolved, fmt.Sprintf("sevens: new node %q", title), created)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "%s git commit failed: %v\n", ui.Success.Render("[new]"), err)
 					} else {
@@ -2829,11 +2861,12 @@ func instantiateCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			db, err := openDB()
+			stack, err := openKB()
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer stack.Close()
+			db := stack.Store.DB()
 
 			templateName := args[0]
 			tmpl, err := apply.LoadTemplate(templateName)

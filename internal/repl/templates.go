@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"sevens/internal/apply"
+	projmd "sevens/internal/projection/md"
 	"sevens/internal/ui"
 )
 
@@ -104,8 +105,8 @@ func (r *REPL) runTemplate(tmpl *apply.NodeTemplate, parent string, targetNode s
 
 	files := append([]string(nil), result.Created...)
 	files = append(files, result.Edited...)
-	if apply.IsGitRepo(r.root) && len(files) > 0 {
-		h, cerr := apply.CommitFiles(r.root, result.CommitMessage, files)
+	if projmd.IsGitRepo(r.root) && len(files) > 0 {
+		h, cerr := projmd.CommitFiles(r.root, result.CommitMessage, files)
 		if cerr != nil {
 			fmt.Fprintf(os.Stderr, "%s git commit: %v\n", ui.Warning.Render("[warn]"), cerr)
 		} else if len(result.Created) > 0 {

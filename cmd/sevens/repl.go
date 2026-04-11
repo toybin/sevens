@@ -25,18 +25,19 @@ func replCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			db, err := openDB()
+			stack, err := openKB()
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer stack.Close()
+			db := stack.Store.DB()
 
 			// Ensure DB is closed on SIGINT/SIGTERM so the lock is released.
 			sigCh := make(chan os.Signal, 1)
 			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 			go func() {
 				<-sigCh
-				db.Close()
+				stack.Close()
 				os.Exit(0)
 			}()
 
@@ -57,7 +58,7 @@ func replCmd() *cobra.Command {
 				}
 			}
 
-			r, err := repl.New(db, resolved, focusNode, globalCfg)
+			r, err := repl.New(db, resolved, focusNode, globalCfg, repl.WithKB(stack.KB))
 			if err != nil {
 				return fmt.Errorf("starting repl: %w", err)
 			}
