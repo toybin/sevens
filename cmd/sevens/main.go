@@ -19,6 +19,7 @@ import (
 	"sevens/internal/backend"
 	"sevens/internal/engine"
 	"sevens/internal/graph"
+	"sevens/internal/kb"
 	projmd "sevens/internal/projection/md"
 	"sevens/internal/store"
 	"sevens/internal/ui"
@@ -252,24 +253,48 @@ func formatCharCount(n int) string {
 }
 
 func printTree(output *graph.OverviewOutput) {
+	// Legacy printTree for EDN compat paths.
+	printTreeFromNodes(overviewNodesToKB(output.Nodes), nil)
+
+	v := output.Validation
+	if len(v.Orphans) > 0 || len(v.MissingParents) > 0 {
+		fmt.Println()
+	}
+	for _, o := range v.Orphans {
+		fmt.Println(o + " " + ui.Warning.Render("(orphan)"))
+	}
+	for _, mp := range v.MissingParents {
+		fmt.Println(mp + " " + ui.Warning.Render("(missing parent)"))
+	}
+}
+
+// overviewNodesToKB converts old graph.OverviewNode to kb.OverviewNode.
+func overviewNodesToKB(nodes []graph.OverviewNode) []kb.OverviewNode {
+	result := make([]kb.OverviewNode, len(nodes))
+	for i, n := range nodes {
+		result[i] = kb.OverviewNode{
+			Title:      n.Title,
+			Parent:     n.Parent,
+			Children:   n.Children,
+			ChildCount: n.ChildCount,
+			CrossRefs:  n.CrossRefs,
+			CharCount:  n.CharCount,
+		}
+	}
+	return result
+}
+
+// printTreeFromNodes prints a tree from kb.OverviewNode slice.
+// violations is optional -- printed after the tree.
+func printTreeFromNodes(nodes []kb.OverviewNode, violations []kb.Violation) {
 	childMap := make(map[string][]string)
-	nodeMap := make(map[string]graph.OverviewNode)
-	orphans := make(map[string]bool)
-	for _, o := range output.Validation.Orphans {
-		orphans[o] = true
-	}
-	missingParents := make(map[string]bool)
-	for _, mp := range output.Validation.MissingParents {
-		missingParents[mp] = true
-	}
+	nodeMap := make(map[string]kb.OverviewNode)
 
 	rootNodes := []string{}
-	for _, n := range output.Nodes {
+	for _, n := range nodes {
 		nodeMap[n.Title] = n
 		if n.Parent == nil {
-			if !orphans[n.Title] {
-				rootNodes = append(rootNodes, n.Title)
-			}
+			rootNodes = append(rootNodes, n.Title)
 		} else {
 			childMap[*n.Parent] = append(childMap[*n.Parent], n.Title)
 		}
@@ -282,17 +307,10 @@ func printTree(output *graph.OverviewOutput) {
 		if !ok {
 			return ""
 		}
-		parts := []string{}
 		if n.CharCount > 0 {
-			parts = append(parts, formatCharCount(n.CharCount))
+			return " " + ui.Dim.Render("("+formatCharCount(n.CharCount)+")")
 		}
-		if n.Pending != "" {
-			parts = append(parts, "pending: "+n.Pending)
-		}
-		if len(parts) == 0 {
-			return ""
-		}
-		return " " + ui.Dim.Render("("+strings.Join(parts, ", ")+")")
+		return ""
 	}
 
 	var printNode func(title, prefix string, isLast bool)
@@ -325,18 +343,15 @@ func printTree(output *graph.OverviewOutput) {
 		}
 	}
 
-	v := output.Validation
-	if len(v.Orphans) > 0 || len(v.MissingParents) > 0 {
-		sb.WriteString("\n")
-	}
-	for _, o := range v.Orphans {
-		sb.WriteString(o + " " + ui.Warning.Render("(orphan)") + "\n")
-	}
-	for _, mp := range v.MissingParents {
-		sb.WriteString(mp + " " + ui.Warning.Render("(missing parent)") + "\n")
-	}
-
 	fmt.Print(sb.String())
+
+	if len(violations) > 0 {
+		fmt.Println()
+		for _, v := range violations {
+			fmt.Printf("%s %s: %s — %s\n",
+				ui.Warning.Render("["+v.Kind+"]"), v.Title, v.Detail, v.Kind)
+		}
+	}
 }
 
 // opName returns a display name for a FileOp.
@@ -468,27 +483,41 @@ func overviewCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			config, err := graph.LoadConfig(resolved)
-			if err != nil {
-				return fmt.Errorf("loading config: %w", err)
+			// EDN output uses legacy path for backward compat
+			if ednOutput {
+				config, err := graph.LoadConfig(resolved)
+				if err != nil {
+					return fmt.Errorf("loading config: %w", err)
+				}
+				db, err := openDB()
+				if err != nil {
+					return err
+				}
+				defer db.Close()
+				output, err := graph.BuildOverview(db, resolved, config)
+				if err != nil {
+					return fmt.Errorf("building overview: %w", err)
+				}
+				return printEDN(output)
 			}
 
-			db, err := openDB()
+			stack, err := openKB()
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer stack.Close()
 
-			output, err := graph.BuildOverview(db, resolved, config)
+			nodes, err := stack.KB.Overview(context.Background(), resolved)
 			if err != nil {
 				return fmt.Errorf("building overview: %w", err)
 			}
 
-			if ednOutput {
-				return printEDN(output)
+			violations, err := stack.KB.Validate(context.Background(), resolved, 9, 0)
+			if err != nil {
+				return fmt.Errorf("validating: %w", err)
 			}
 
-			printTree(output)
+			printTreeFromNodes(nodes, violations)
 			return nil
 		},
 	}
@@ -583,43 +612,47 @@ func treeCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			config, err := graph.LoadConfig(resolved)
-			if err != nil {
-				return fmt.Errorf("loading config: %w", err)
+			// EDN output uses legacy path
+			if ednOutput {
+				config, err := graph.LoadConfig(resolved)
+				if err != nil {
+					return fmt.Errorf("loading config: %w", err)
+				}
+				db, err := openDB()
+				if err != nil {
+					return err
+				}
+				defer db.Close()
+				output, err := graph.BuildOverview(db, resolved, config)
+				if err != nil {
+					return fmt.Errorf("building overview: %w", err)
+				}
+				return printEDN(output)
 			}
 
-			db, err := openDB()
+			stack, err := openKB()
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer stack.Close()
 
-			output, err := graph.BuildOverview(db, resolved, config)
+			if subj := stack.KB.Resolve(context.Background(), resolved, nodeTitle); subj == "" {
+				return fmt.Errorf("node not found: %s", nodeTitle)
+			}
+
+			// Get full overview and filter to subtree for display
+			nodes, err := stack.KB.Overview(context.Background(), resolved)
 			if err != nil {
 				return fmt.Errorf("building overview: %w", err)
 			}
 
-			// Verify the node actually exists in this root
-			nodeSubject, _ := store.ResolveNode(db, nodeTitle, resolved)
-			if nodeSubject == "" {
-				return fmt.Errorf("node not found: %s", nodeTitle)
-			}
-
-			if ednOutput {
-				// Filter to just the subtree
-				// For now, print the full overview in EDN (filtering is complex)
-				return printEDN(output)
-			}
-
-			// Build child map from overview data
 			childMap := make(map[string][]string)
-			for _, n := range output.Nodes {
+			for _, n := range nodes {
 				if n.Parent != nil {
 					childMap[*n.Parent] = append(childMap[*n.Parent], n.Title)
 				}
 			}
 
-			// Print the subtree
 			var printNode func(title, prefix string, isLast bool)
 			printNode = func(title, prefix string, isLast bool) {
 				connector := "├── "
@@ -627,25 +660,21 @@ func treeCmd() *cobra.Command {
 					connector = "└── "
 				}
 				fmt.Print(prefix + ui.Dim.Render(connector) + ui.NodeTitle.Render(title) + "\n")
-
 				childPrefix := prefix + "│   "
 				if isLast {
 					childPrefix = prefix + "    "
 				}
-
 				children := childMap[title]
 				for i, child := range children {
 					printNode(child, childPrefix, i == len(children)-1)
 				}
 			}
 
-			// Print root node and its children
 			fmt.Println(ui.NodeTitle.Render(nodeTitle))
 			children := childMap[nodeTitle]
 			for i, child := range children {
 				printNode(child, "", i == len(children)-1)
 			}
-
 			return nil
 		},
 	}
@@ -2085,24 +2114,47 @@ func searchCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			db, err := openDB()
+			stack, err := openKB()
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer stack.Close()
 
 			query := args[0]
+			ctx := context.Background()
 
-			// Search titles (scoped to current root)
-			titles, err := store.SearchTitles(db, query, resolved)
+			// Search titles: find subjects whose node/title contains query,
+			// then filter to this root.
+			titleSubjects, err := stack.Store.Search(ctx, kb.PredNodeTitle, query)
 			if err != nil {
 				return fmt.Errorf("searching titles: %w", err)
 			}
+			var titles []string
+			for _, subj := range titleSubjects {
+				r, _, _ := stack.Graph.Lookup(ctx, subj, kb.PredNodeRoot)
+				if r == resolved {
+					t, _, _ := stack.Graph.Lookup(ctx, subj, kb.PredNodeTitle)
+					if t != "" {
+						titles = append(titles, t)
+					}
+				}
+			}
 
-			// Search content (scoped to current root)
-			contentMatches, err := store.SearchContent(db, query, resolved)
+			// Search content: find subjects whose node/content contains query,
+			// then filter to this root and resolve to titles.
+			contentSubjects, err := stack.Store.Search(ctx, kb.PredNodeContent, query)
 			if err != nil {
 				return fmt.Errorf("searching content: %w", err)
+			}
+			var contentMatches []string
+			for _, subj := range contentSubjects {
+				r, _, _ := stack.Graph.Lookup(ctx, subj, kb.PredNodeRoot)
+				if r == resolved {
+					t, _, _ := stack.Graph.Lookup(ctx, subj, kb.PredNodeTitle)
+					if t != "" {
+						contentMatches = append(contentMatches, t)
+					}
+				}
 			}
 
 			if len(titles) == 0 && len(contentMatches) == 0 {
