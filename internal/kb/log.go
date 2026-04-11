@@ -36,41 +36,41 @@ func (k *KB) AppendLog(ctx context.Context, entry LogEntry) error {
 	}
 
 	triples := []triple.Triple{
-		{entry.Subject, PredLogEvent, entry.Event},
-		{entry.Subject, PredLogTimestamp, entry.Timestamp},
+		{Subject: entry.Subject, Predicate: PredLogEvent, Object: entry.Event},
+		{Subject: entry.Subject, Predicate: PredLogTimestamp, Object: entry.Timestamp},
 	}
 	if entry.Root != "" {
-		triples = append(triples, triple.Triple{entry.Subject, PredLogRoot, entry.Root})
+		triples = append(triples, triple.Triple{Subject: entry.Subject, Predicate: PredLogRoot, Object: entry.Root})
 	}
 	if entry.Function != "" {
-		triples = append(triples, triple.Triple{entry.Subject, PredLogFunction, entry.Function})
+		triples = append(triples, triple.Triple{Subject: entry.Subject, Predicate: PredLogFunction, Object: entry.Function})
 	}
 	if entry.Node != "" {
-		triples = append(triples, triple.Triple{entry.Subject, PredLogNode, entry.Node})
+		triples = append(triples, triple.Triple{Subject: entry.Subject, Predicate: PredLogNode, Object: entry.Node})
 	}
 	if entry.Step != "" {
-		triples = append(triples, triple.Triple{entry.Subject, PredLogStep, entry.Step})
+		triples = append(triples, triple.Triple{Subject: entry.Subject, Predicate: PredLogStep, Object: entry.Step})
 	}
 	if entry.StepIndex != "" {
-		triples = append(triples, triple.Triple{entry.Subject, PredLogStepIndex, entry.StepIndex})
+		triples = append(triples, triple.Triple{Subject: entry.Subject, Predicate: PredLogStepIndex, Object: entry.StepIndex})
 	}
 	if entry.Session != "" {
-		triples = append(triples, triple.Triple{entry.Subject, PredLogSession, entry.Session})
+		triples = append(triples, triple.Triple{Subject: entry.Subject, Predicate: PredLogSession, Object: entry.Session})
 	}
 	if entry.Result != "" {
-		triples = append(triples, triple.Triple{entry.Subject, PredLogResult, entry.Result})
+		triples = append(triples, triple.Triple{Subject: entry.Subject, Predicate: PredLogResult, Object: entry.Result})
 	}
 	if entry.Commit != "" {
-		triples = append(triples, triple.Triple{entry.Subject, PredLogCommit, entry.Commit})
+		triples = append(triples, triple.Triple{Subject: entry.Subject, Predicate: PredLogCommit, Object: entry.Commit})
 	}
 	if entry.Note != "" {
-		triples = append(triples, triple.Triple{entry.Subject, PredLogNote, entry.Note})
+		triples = append(triples, triple.Triple{Subject: entry.Subject, Predicate: PredLogNote, Object: entry.Note})
 	}
 	for _, f := range entry.FilesCreated {
-		triples = append(triples, triple.Triple{entry.Subject, PredLogFilesCreated, f})
+		triples = append(triples, triple.Triple{Subject: entry.Subject, Predicate: PredLogFilesCreated, Object: f})
 	}
 	for _, f := range entry.FilesEdited {
-		triples = append(triples, triple.Triple{entry.Subject, PredLogFilesEdited, f})
+		triples = append(triples, triple.Triple{Subject: entry.Subject, Predicate: PredLogFilesEdited, Object: f})
 	}
 
 	return k.graph.Store().AssertBatch(ctx, triples)

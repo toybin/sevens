@@ -235,25 +235,25 @@ func ParseFiles(files []string) ([]ParsedNode, []string) {
 func nodeToTriples(node ParsedNode, root string) []triple.Triple {
 	subj := kb.NodeSubject(root, node.Title)
 	triples := []triple.Triple{
-		{subj, kb.PredNodeTitle, node.Title},
-		{subj, kb.PredNodeRoot, root},
-		{subj, kb.PredNodeContent, node.Content},
-		{subj, kb.PredNodeFile, node.FilePath},
-		{subj, kb.PredNodeCharCount, fmt.Sprintf("%d", len(node.Content))},
+		{Subject: subj, Predicate: kb.PredNodeTitle, Object: node.Title},
+		{Subject: subj, Predicate: kb.PredNodeRoot, Object: root},
+		{Subject: subj, Predicate: kb.PredNodeContent, Object: node.Content},
+		{Subject: subj, Predicate: kb.PredNodeFile, Object: node.FilePath},
+		{Subject: subj, Predicate: kb.PredNodeCharCount, Object: fmt.Sprintf("%d", len(node.Content))},
 	}
 
 	if node.Parent != nil {
 		parentSubj := kb.NodeSubject(root, *node.Parent)
-		triples = append(triples, triple.Triple{subj, kb.PredNodeParent, parentSubj})
+		triples = append(triples, triple.Triple{Subject: subj, Predicate: kb.PredNodeParent, Object: parentSubj})
 	}
 
 	for _, ref := range node.CrossRefs {
 		refSubj := kb.NodeSubject(root, ref)
-		triples = append(triples, triple.Triple{subj, kb.PredNodeLink, refSubj})
+		triples = append(triples, triple.Triple{Subject: subj, Predicate: kb.PredNodeLink, Object: refSubj})
 	}
 
 	if node.SiblingRole != "" {
-		triples = append(triples, triple.Triple{subj, kb.PredNodeRole, node.SiblingRole})
+		triples = append(triples, triple.Triple{Subject: subj, Predicate: kb.PredNodeRole, Object: node.SiblingRole})
 	}
 
 	return triples

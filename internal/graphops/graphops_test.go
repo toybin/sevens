@@ -98,7 +98,7 @@ func TestComposeSingleHop(t *testing.T) {
 	s := g.Store()
 
 	// A --parent--> B
-	s.Assert(ctx(), triple.Triple{"A", "parent", "B"})
+	s.Assert(ctx(), triple.Triple{Subject: "A", Predicate: "parent", Object: "B"})
 
 	got, err := g.Compose(ctx(), "A", graphops.ParsePath([]string{"parent"}))
 	if err != nil {
@@ -116,9 +116,9 @@ func TestComposeInverse(t *testing.T) {
 	// A --parent--> P
 	// B --parent--> P
 	// C --parent--> P
-	s.Assert(ctx(), triple.Triple{"A", "parent", "P"})
-	s.Assert(ctx(), triple.Triple{"B", "parent", "P"})
-	s.Assert(ctx(), triple.Triple{"C", "parent", "P"})
+	s.Assert(ctx(), triple.Triple{Subject: "A", Predicate: "parent", Object: "P"})
+	s.Assert(ctx(), triple.Triple{Subject: "B", Predicate: "parent", Object: "P"})
+	s.Assert(ctx(), triple.Triple{Subject: "C", Predicate: "parent", Object: "P"})
 
 	// Children of P = inverse of parent
 	got, err := g.Compose(ctx(), "P", graphops.ParsePath([]string{"parent~"}))
@@ -136,9 +136,9 @@ func TestComposeSiblings(t *testing.T) {
 	s := g.Store()
 
 	// A, B, C all have parent P
-	s.Assert(ctx(), triple.Triple{"A", "parent", "P"})
-	s.Assert(ctx(), triple.Triple{"B", "parent", "P"})
-	s.Assert(ctx(), triple.Triple{"C", "parent", "P"})
+	s.Assert(ctx(), triple.Triple{Subject: "A", Predicate: "parent", Object: "P"})
+	s.Assert(ctx(), triple.Triple{Subject: "B", Predicate: "parent", Object: "P"})
+	s.Assert(ctx(), triple.Triple{Subject: "C", Predicate: "parent", Object: "P"})
 
 	// Siblings of A: go to parent, then find all children of parent
 	got, err := g.Compose(ctx(), "A", graphops.ParsePath([]string{"parent", "parent~"}))
@@ -157,8 +157,8 @@ func TestComposeMultiHop(t *testing.T) {
 	s := g.Store()
 
 	// A --parent--> B --parent--> C
-	s.Assert(ctx(), triple.Triple{"A", "parent", "B"})
-	s.Assert(ctx(), triple.Triple{"B", "parent", "C"})
+	s.Assert(ctx(), triple.Triple{Subject: "A", Predicate: "parent", Object: "B"})
+	s.Assert(ctx(), triple.Triple{Subject: "B", Predicate: "parent", Object: "C"})
 
 	// Grandparent of A
 	got, err := g.Compose(ctx(), "A", graphops.ParsePath([]string{"parent", "parent"}))
@@ -200,10 +200,10 @@ func TestComposeDeduplicates(t *testing.T) {
 	s := g.Store()
 
 	// Diamond: A --r--> B, A --r--> C, B --s--> D, C --s--> D
-	s.Assert(ctx(), triple.Triple{"A", "r", "B"})
-	s.Assert(ctx(), triple.Triple{"A", "r", "C"})
-	s.Assert(ctx(), triple.Triple{"B", "s", "D"})
-	s.Assert(ctx(), triple.Triple{"C", "s", "D"})
+	s.Assert(ctx(), triple.Triple{Subject: "A", Predicate: "r", Object: "B"})
+	s.Assert(ctx(), triple.Triple{Subject: "A", Predicate: "r", Object: "C"})
+	s.Assert(ctx(), triple.Triple{Subject: "B", Predicate: "s", Object: "D"})
+	s.Assert(ctx(), triple.Triple{Subject: "C", Predicate: "s", Object: "D"})
 
 	got, err := g.Compose(ctx(), "A", graphops.ParsePath([]string{"r", "s"}))
 	if err != nil {
@@ -222,9 +222,9 @@ func TestReachable(t *testing.T) {
 	s := g.Store()
 
 	// Chain: A --r--> B --r--> C --r--> D
-	s.Assert(ctx(), triple.Triple{"A", "r", "B"})
-	s.Assert(ctx(), triple.Triple{"B", "r", "C"})
-	s.Assert(ctx(), triple.Triple{"C", "r", "D"})
+	s.Assert(ctx(), triple.Triple{Subject: "A", Predicate: "r", Object: "B"})
+	s.Assert(ctx(), triple.Triple{Subject: "B", Predicate: "r", Object: "C"})
+	s.Assert(ctx(), triple.Triple{Subject: "C", Predicate: "r", Object: "D"})
 
 	got, err := g.Reachable(ctx(), "A", "r", false)
 	if err != nil {
@@ -241,9 +241,9 @@ func TestReachableInverse(t *testing.T) {
 	s := g.Store()
 
 	// A --parent--> R, B --parent--> R, C --parent--> A
-	s.Assert(ctx(), triple.Triple{"A", "parent", "R"})
-	s.Assert(ctx(), triple.Triple{"B", "parent", "R"})
-	s.Assert(ctx(), triple.Triple{"C", "parent", "A"})
+	s.Assert(ctx(), triple.Triple{Subject: "A", Predicate: "parent", Object: "R"})
+	s.Assert(ctx(), triple.Triple{Subject: "B", Predicate: "parent", Object: "R"})
+	s.Assert(ctx(), triple.Triple{Subject: "C", Predicate: "parent", Object: "A"})
 
 	// All descendants of R (follow parent inverse)
 	got, err := g.Reachable(ctx(), "R", "parent", true)
@@ -262,8 +262,8 @@ func TestReachableNoCycle(t *testing.T) {
 	s := g.Store()
 
 	// Cycle: A --r--> B --r--> A
-	s.Assert(ctx(), triple.Triple{"A", "r", "B"})
-	s.Assert(ctx(), triple.Triple{"B", "r", "A"})
+	s.Assert(ctx(), triple.Triple{Subject: "A", Predicate: "r", Object: "B"})
+	s.Assert(ctx(), triple.Triple{Subject: "B", Predicate: "r", Object: "A"})
 
 	got, err := g.Reachable(ctx(), "A", "r", false)
 	if err != nil {
@@ -282,12 +282,12 @@ func TestRetractSubgraph(t *testing.T) {
 	s := g.Store()
 
 	// Two nodes in root "R1", one in "R2"
-	s.Assert(ctx(), triple.Triple{"n1", "root", "R1"})
-	s.Assert(ctx(), triple.Triple{"n1", "content", "hello"})
-	s.Assert(ctx(), triple.Triple{"n2", "root", "R1"})
-	s.Assert(ctx(), triple.Triple{"n2", "content", "world"})
-	s.Assert(ctx(), triple.Triple{"n3", "root", "R2"})
-	s.Assert(ctx(), triple.Triple{"n3", "content", "keep"})
+	s.Assert(ctx(), triple.Triple{Subject: "n1", Predicate: "root", Object: "R1"})
+	s.Assert(ctx(), triple.Triple{Subject: "n1", Predicate: "content", Object: "hello"})
+	s.Assert(ctx(), triple.Triple{Subject: "n2", Predicate: "root", Object: "R1"})
+	s.Assert(ctx(), triple.Triple{Subject: "n2", Predicate: "content", Object: "world"})
+	s.Assert(ctx(), triple.Triple{Subject: "n3", Predicate: "root", Object: "R2"})
+	s.Assert(ctx(), triple.Triple{Subject: "n3", Predicate: "content", Object: "keep"})
 
 	err := g.RetractSubgraph(ctx(), "root", "R1")
 	if err != nil {
@@ -360,11 +360,11 @@ func TestSubgraph(t *testing.T) {
 	g := testGraph(t)
 	s := g.Store()
 
-	s.Assert(ctx(), triple.Triple{"n1", "root", "R1"})
-	s.Assert(ctx(), triple.Triple{"n1", "content", "hello"})
-	s.Assert(ctx(), triple.Triple{"n2", "root", "R1"})
-	s.Assert(ctx(), triple.Triple{"n2", "content", "world"})
-	s.Assert(ctx(), triple.Triple{"n3", "root", "R2"})
+	s.Assert(ctx(), triple.Triple{Subject: "n1", Predicate: "root", Object: "R1"})
+	s.Assert(ctx(), triple.Triple{Subject: "n1", Predicate: "content", Object: "hello"})
+	s.Assert(ctx(), triple.Triple{Subject: "n2", Predicate: "root", Object: "R1"})
+	s.Assert(ctx(), triple.Triple{Subject: "n2", Predicate: "content", Object: "world"})
+	s.Assert(ctx(), triple.Triple{Subject: "n3", Predicate: "root", Object: "R2"})
 
 	triples, err := g.Subgraph(ctx(), "root", "R1")
 	if err != nil {

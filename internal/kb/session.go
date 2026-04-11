@@ -25,8 +25,8 @@ func (k *KB) StartSession(ctx context.Context, focusSubject string) (*Session, e
 	ts := time.Now().UTC().Format(time.RFC3339)
 
 	triples := []triple.Triple{
-		{subject, PredSessionFocus, focusSubject},
-		{subject, PredSessionStarted, ts},
+		{Subject: subject, Predicate: PredSessionFocus, Object: focusSubject},
+		{Subject: subject, Predicate: PredSessionStarted, Object: ts},
 	}
 	if err := k.graph.Store().AssertBatch(ctx, triples); err != nil {
 		return nil, err
