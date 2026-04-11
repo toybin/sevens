@@ -15,6 +15,7 @@ import (
 	"github.com/samber/mo"
 	"sevens/internal/apply"
 	"sevens/internal/backend"
+	"sevens/internal/config"
 	"sevens/internal/graph"
 	"sevens/internal/store"
 )
@@ -67,7 +68,7 @@ type PipelineConfig struct {
 	NodeTitle     string
 	TargetBlock   *graph.BlockTarget
 	Function      *apply.Function
-	GlobalConfig  apply.GlobalConfig
+	GlobalConfig  config.GlobalConfig
 	Walk          *graph.WalkOutput
 	ContextStr    string // pre-built context files string
 	DryRun        bool
@@ -887,7 +888,7 @@ type ReviseConfig struct {
 	Confirm       bool
 	StreamText    *os.File        // nil to suppress streaming
 	Backend       backend.Backend // inference backend (nil falls back to Anthropic API)
-	GlobalConfig  *apply.GlobalConfig
+	GlobalConfig  *config.GlobalConfig
 	ContextStr    string // pre-built context string (includes, context files)
 	ModelOverride string
 	Instruction   string
@@ -939,11 +940,11 @@ func ReviseStep(cfg ReviseConfig) (*apply.LogEntry, string, error) {
 	step := steps[stepIndex]
 
 	// Resolve global config
-	var globalConfig *apply.GlobalConfig
+	var globalConfig *config.GlobalConfig
 	if cfg.GlobalConfig != nil {
 		globalConfig = cfg.GlobalConfig
 	} else {
-		gc, err := apply.LoadGlobalConfig()
+		gc, err := config.LoadGlobalConfig()
 		if err != nil {
 			return nil, "", fmt.Errorf("loading global config: %w", err)
 		}

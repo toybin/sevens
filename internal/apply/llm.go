@@ -5,54 +5,17 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
-	"olympos.io/encoding/edn"
-	"sevens/internal/store"
+	"sevens/internal/config"
 )
 
-var defaultLLMConfig = LLMConfig{
-	Provider:  "anthropic",
-	Model:     "claude-sonnet-4-20250514",
-	APIKeyEnv: "ANTHROPIC_API_KEY",
-}
-
+// LoadGlobalConfig delegates to config.LoadGlobalConfig.
+// Callers should migrate to importing the config package directly.
 func LoadGlobalConfig() (GlobalConfig, error) {
-	configDir, err := store.ConfigDir()
-	if err != nil {
-		return GlobalConfig{}, fmt.Errorf("get config dir: %w", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(configDir, "config.edn"))
-	if os.IsNotExist(err) {
-		return GlobalConfig{LLM: defaultLLMConfig}, nil
-	}
-	if err != nil {
-		return GlobalConfig{}, fmt.Errorf("read config.edn: %w", err)
-	}
-
-	var cfg GlobalConfig
-	if err := edn.Unmarshal(data, &cfg); err != nil {
-		return GlobalConfig{}, fmt.Errorf("parse config.edn: %w", err)
-	}
-
-	if cfg.LLM.Provider == "" {
-		cfg.LLM.Provider = defaultLLMConfig.Provider
-	}
-	if cfg.LLM.Model == "" {
-		cfg.LLM.Model = defaultLLMConfig.Model
-	}
-	if cfg.LLM.APIKeyEnv == "" {
-		cfg.LLM.APIKeyEnv = defaultLLMConfig.APIKeyEnv
-	}
-	if cfg.CostThreshold == 0 {
-		cfg.CostThreshold = 0.01
-	}
-
-	return cfg, nil
+	return config.LoadGlobalConfig()
 }
 
 // resolveAPIKey returns the API key from config.APIKey if set, otherwise falls

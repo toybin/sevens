@@ -1,6 +1,10 @@
 package apply
 
-import "fmt"
+import (
+	"fmt"
+
+	"sevens/internal/config"
+)
 
 // PathSpec declares a morphism path to traverse from the target node.
 type PathSpec struct {
@@ -206,54 +210,12 @@ type TemplateDraft struct {
 	Open              bool `edn:"open,omitempty"`
 }
 
-// LLMConfig holds connection details for an LLM provider.
-type LLMConfig struct {
-	Provider  string `edn:"provider"`
-	Model     string `edn:"model"`
-	APIKeyEnv string `edn:"api-key-env"`
-	APIKey    string `edn:"api-key"` // direct API key, takes precedence over api-key-env
-}
+// LLMConfig is an alias for config.LLMConfig.
+// Canonical definition lives in the config package.
+type LLMConfig = config.LLMConfig
 
-// BackendConfig holds the configuration for a specific backend.
-type BackendConfig struct {
-	Type             string `edn:"type"`               // "anthropic", "codex", "claude"
-	Command          string `edn:"command"`            // CLI binary path (for codex/claude)
-	GeneratedConfDir string `edn:"generated-conf-dir"` // path to generated config dir (for codex/claude)
-}
+// BackendConfig is an alias for config.BackendConfig.
+type BackendConfig = config.BackendConfig
 
-// GlobalConfig is the top-level config from ~/.config/sevens/config.edn.
-type GlobalConfig struct {
-	LLM           LLMConfig                `edn:"llm"`
-	Models        map[string]LLMConfig     `edn:"models"`   // named profiles like "fast", "capable", "powerful"
-	Backend       string                   `edn:"backend"`  // default backend name (e.g., "anthropic", "codex", "claude")
-	Backends      map[string]BackendConfig `edn:"backends"` // backend configurations
-	SystemPrompt  string                   `edn:"system-prompt"`
-	ContextFiles  []string                 `edn:"context-files"`  // global context files injected into every call
-	CostThreshold float64                  `edn:"cost-threshold"` // auto-approve below this USD amount
-	Theme         string                   `edn:"theme"`          // "light" or "dark" for glamour rendering
-}
-
-// ResolveModel looks up a named model profile from the Models map and returns the
-// resolved LLMConfig. Fields not set in the profile are inherited from the default
-// LLM config. If name is empty or not found, the default LLM config is returned.
-func (g *GlobalConfig) ResolveModel(name string) LLMConfig {
-	if name == "" {
-		return g.LLM
-	}
-	profile, ok := g.Models[name]
-	if !ok {
-		return g.LLM
-	}
-	// Inherit missing fields from the default LLM config.
-	if profile.Provider == "" {
-		profile.Provider = g.LLM.Provider
-	}
-	if profile.Model == "" {
-		profile.Model = g.LLM.Model
-	}
-	if profile.APIKey == "" && profile.APIKeyEnv == "" {
-		profile.APIKeyEnv = g.LLM.APIKeyEnv
-		profile.APIKey = g.LLM.APIKey
-	}
-	return profile
-}
+// GlobalConfig is an alias for config.GlobalConfig.
+type GlobalConfig = config.GlobalConfig

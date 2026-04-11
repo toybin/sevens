@@ -9,6 +9,7 @@ import (
 	_ "turso.tech/database/tursogo"
 
 	"sevens/internal/apply"
+	"sevens/internal/config"
 	"sevens/internal/graph"
 	"sevens/internal/store"
 )
@@ -167,7 +168,7 @@ func TestRunPipeline_DryRunDoesNotWriteLogOrSuspension(t *testing.T) {
 		Root:         root,
 		NodeTitle:    "Node",
 		Function:     fn,
-		GlobalConfig: apply.GlobalConfig{},
+		GlobalConfig: config.GlobalConfig{},
 		Walk:         walk,
 		DryRun:       true,
 	}, 0, "")

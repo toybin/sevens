@@ -6,13 +6,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"sevens/internal/apply"
+	"sevens/internal/config"
 )
 
 // FromConfig creates a Backend from the global config and an optional override name.
 // If backendName is empty, uses the config's default backend.
 // If no backend is configured, falls back to "anthropic".
-func FromConfig(globalConfig apply.GlobalConfig, backendName string) (Backend, error) {
+func FromConfig(globalConfig config.GlobalConfig, backendName string) (Backend, error) {
 	name := backendName
 	if name == "" {
 		name = globalConfig.Backend
@@ -39,7 +39,7 @@ func FromConfig(globalConfig apply.GlobalConfig, backendName string) (Backend, e
 	}
 }
 
-func fromBackendConfig(name string, cfg apply.BackendConfig, globalConfig apply.GlobalConfig) (Backend, error) {
+func fromBackendConfig(name string, cfg config.BackendConfig, globalConfig config.GlobalConfig) (Backend, error) {
 	typ := cfg.Type
 	if typ == "" {
 		typ = name
@@ -65,7 +65,7 @@ func fromBackendConfig(name string, cfg apply.BackendConfig, globalConfig apply.
 	}
 }
 
-func newAnthropicFromGlobal(globalConfig apply.GlobalConfig) (*AnthropicBackend, error) {
+func newAnthropicFromGlobal(globalConfig config.GlobalConfig) (*AnthropicBackend, error) {
 	return NewAnthropicBackend(globalConfig.LLM.APIKey, globalConfig.LLM.APIKeyEnv)
 }
 

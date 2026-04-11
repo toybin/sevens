@@ -17,6 +17,7 @@ import (
 	"olympos.io/encoding/edn"
 	"sevens/internal/apply"
 	"sevens/internal/backend"
+	"sevens/internal/config"
 	"sevens/internal/engine"
 	"sevens/internal/function"
 	"sevens/internal/graph"
@@ -440,13 +441,9 @@ func completeNodeTitles(cmd *cobra.Command, args []string, toComplete string) ([
 
 // completeFunctionNames provides dynamic completion for function name arguments.
 func completeFunctionNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-	fns, err := apply.ListFunctions()
+	names, err := function.ListFunctions()
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
-	}
-	var names []string
-	for _, fn := range fns {
-		names = append(names, fn.Name)
 	}
 	return names, cobra.ShellCompDirectiveNoFileComp
 }
@@ -1110,7 +1107,7 @@ func runPipeline(root, nodeTitle string, fn *apply.Function, startStep int, prev
 		targetLabel = targetBlock.Label()
 	}
 
-	globalConfig, err := apply.LoadGlobalConfig()
+	globalConfig, err := config.LoadGlobalConfig()
 	if err != nil {
 		return fmt.Errorf("loading global config: %w", err)
 	}
@@ -1423,7 +1420,7 @@ func acceptCmd() *cobra.Command {
 					streamTo = os.Stderr
 				}
 
-				globalConfig, _ := apply.LoadGlobalConfig()
+				globalConfig, _ := config.LoadGlobalConfig()
 				resolvedBackend := backendFlag
 				if resolvedBackend == "" {
 					resolvedBackend = sus.Backend
@@ -1931,7 +1928,7 @@ func statusCmd() *cobra.Command {
 				fmt.Printf("%s %s\n", ui.Dim.Render("Excludes:"), strings.Join(session.Excludes, ", "))
 			}
 
-			globalCfg, gErr := apply.LoadGlobalConfig()
+			globalCfg, gErr := config.LoadGlobalConfig()
 			if gErr == nil && len(globalCfg.ContextFiles) > 0 {
 				fmt.Printf("%s %s\n", ui.Dim.Render("Global context:"), ui.Dim.Render(strings.Join(globalCfg.ContextFiles, ", ")))
 			}
@@ -2318,11 +2315,10 @@ func prepareCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			oldFn, err := apply.LoadFunction(fnName)
+			fn, oldFn, err := function.LoadFunction(fnName)
 			if err != nil {
 				return fmt.Errorf("loading function: %w", err)
 			}
-			fn := function.ConvertFunction(oldFn)
 
 			stack, err := openKB()
 			if err != nil {
@@ -2376,7 +2372,7 @@ func prepareCmd() *cobra.Command {
 				}
 			}
 
-			globalConfig, err := apply.LoadGlobalConfig()
+			globalConfig, err := config.LoadGlobalConfig()
 			if err != nil {
 				return fmt.Errorf("loading config: %w", err)
 			}
@@ -2988,7 +2984,7 @@ func configCmd() *cobra.Command {
 		Use:   "show",
 		Short: "Show current configuration",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			globalConfig, err := apply.LoadGlobalConfig()
+			globalConfig, err := config.LoadGlobalConfig()
 			if err != nil {
 				return err
 			}

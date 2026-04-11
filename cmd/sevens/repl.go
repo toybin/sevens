@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"sevens/internal/apply"
+	"sevens/internal/config"
 	"sevens/internal/repl"
 )
 
@@ -41,7 +42,7 @@ func replCmd() *cobra.Command {
 				os.Exit(0)
 			}()
 
-			globalCfg, err := apply.LoadGlobalConfig()
+			globalCfg, err := config.LoadGlobalConfig()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[warn] loading global config: %v\n", err)
 				// Non-fatal: continue with empty config.

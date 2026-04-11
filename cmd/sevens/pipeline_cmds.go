@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"sevens/internal/apply"
 	"sevens/internal/backend"
+	"sevens/internal/config"
 	"sevens/internal/engine"
 	"sevens/internal/function"
 	"sevens/internal/projection"
@@ -59,12 +60,11 @@ func applyCmd2() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			// Load old-style function definition and convert
-			oldFn, err := apply.LoadFunction(fnName)
+			// Load function definition and convert to new type
+			fn, oldFn, err := function.LoadFunction(fnName)
 			if err != nil {
 				return fmt.Errorf("loading function: %w", err)
 			}
-			fn := function.ConvertFunction(oldFn)
 
 			if dryRun {
 				// For dry-run, fall back to old pipeline which handles prompt rendering/display
@@ -79,7 +79,7 @@ func applyCmd2() *cobra.Command {
 			defer stack.Close()
 
 			// Create backend
-			globalConfig, err := apply.LoadGlobalConfig()
+			globalConfig, err := config.LoadGlobalConfig()
 			if err != nil {
 				return fmt.Errorf("loading config: %w", err)
 			}
@@ -183,15 +183,14 @@ func acceptCmd2() *cobra.Command {
 			}
 
 			// Load the function definition
-			oldFn, err := apply.LoadFunction(pipeline.FunctionName)
+			fn, _, err := function.LoadFunction(pipeline.FunctionName)
 			if err != nil {
 				return fmt.Errorf("loading function: %w", err)
 			}
-			fn := function.ConvertFunction(oldFn)
 
 			if with != "" {
 				// Revision
-				globalConfig, _ := apply.LoadGlobalConfig()
+				globalConfig, _ := config.LoadGlobalConfig()
 				be, beErr := backend.FromConfig(globalConfig, backendFlag)
 				if beErr != nil {
 					return fmt.Errorf("initializing backend: %w", beErr)
@@ -208,7 +207,7 @@ func acceptCmd2() *cobra.Command {
 			}
 
 			// No --with: accept and advance
-			globalConfig, _ := apply.LoadGlobalConfig()
+			globalConfig, _ := config.LoadGlobalConfig()
 			be, beErr := backend.FromConfig(globalConfig, backendFlag)
 			if beErr != nil {
 				fmt.Fprintf(os.Stderr, "[warn] backend init: %v, continuing without backend\n", beErr)
@@ -519,7 +518,7 @@ func runLegacyAccept(resolved, arg, with string, confirm bool, backendFlag strin
 			streamTo = os.Stderr
 		}
 
-		globalConfig, _ := apply.LoadGlobalConfig()
+		globalConfig, _ := config.LoadGlobalConfig()
 		resolvedBackend := backendFlag
 		if resolvedBackend == "" {
 			resolvedBackend = sus.Backend

@@ -17,7 +17,9 @@ import (
 	"olympos.io/encoding/edn"
 	"sevens/internal/apply"
 	"sevens/internal/backend"
+	"sevens/internal/config"
 	"sevens/internal/engine"
+	"sevens/internal/function"
 	"sevens/internal/graph"
 	"sevens/internal/kb"
 	projmd "sevens/internal/projection/md"
@@ -46,7 +48,7 @@ type REPL struct {
 	backendName        string   // backend override; "" = use globalCfg default
 	lastList           []string // last numbered list printed (for numeric nav)
 	lastBlocks         []graph.BlockListEntry
-	globalCfg          apply.GlobalConfig
+	globalCfg          config.GlobalConfig
 	mode               Mode
 	noteLines          []string // buffer for note mode
 	discussNode        string   // "Discussion - <Title>" when in discussion mode
@@ -67,7 +69,7 @@ func WithKB(k *kb.KB) Option {
 }
 
 // New creates a REPL and initialises readline. focusNode may be "".
-func New(db *sql.DB, root string, focusNode string, globalCfg apply.GlobalConfig, opts ...Option) (*REPL, error) {
+func New(db *sql.DB, root string, focusNode string, globalCfg config.GlobalConfig, opts ...Option) (*REPL, error) {
 	// Apply theme from config if set.
 	if globalCfg.Theme != "" {
 		ui.SetTheme(globalCfg.Theme)
@@ -279,24 +281,20 @@ func printEDN(v any) error {
 }
 
 func functionNames() []string {
-	fns, err := apply.ListFunctions()
+	names, err := function.ListFunctions()
 	if err != nil {
 		return nil
-	}
-	names := make([]string, len(fns))
-	for i, f := range fns {
-		names[i] = f.Name
 	}
 	return names
 }
 
 func isFunctionName(name string) bool {
-	fns, err := apply.ListFunctions()
+	names, err := function.ListFunctions()
 	if err != nil {
 		return false
 	}
-	for _, f := range fns {
-		if f.Name == name {
+	for _, n := range names {
+		if n == name {
 			return true
 		}
 	}
@@ -353,7 +351,7 @@ func resolveSuspensionBlock(db *sql.DB, root, nodeTitle string, sus *engine.Susp
 
 // ─── Effective config ─────────────────────────────────────────────────────────
 
-func (r *REPL) effectiveCfg() apply.GlobalConfig {
+func (r *REPL) effectiveCfg() config.GlobalConfig {
 	cfg := r.globalCfg
 	if r.modelFlag != "" {
 		resolved := cfg.ResolveModel(r.modelFlag)
