@@ -113,6 +113,14 @@ actions:
   assertBatch (triples: set Triple): ()
     requires: --
     effects: asserts all triples. Idempotent per triple.
+
+  retractBySubjectPrefix (subject: String, prefix: String): ()
+    requires: --
+    effects: retracts all triples whose subject starts with prefix.
+
+  retractByPredicate (predicate: String): ()
+    requires: --
+    effects: retracts all triples with the given predicate.
 ```
 
 These are CRUD operations on triples. There is no domain logic here.
@@ -132,6 +140,12 @@ queries:
   search (predicate: String, substring: String): (subjects: set String)
     -- find subjects whose object for the given predicate contains
     -- the substring
+
+  rawQuery (sql: String): (rows: seq seq String)
+    -- executes arbitrary SQL against the underlying store.
+    -- returns a string matrix: first row is column headers,
+    -- subsequent rows are result rows. Escape hatch for queries
+    -- not expressible via the typed query interface.
 ```
 
 ---
@@ -176,12 +190,8 @@ right now.
 
 ## Open Questions
 
-1. **Transaction boundaries**: the current actions are individual triple
-   operations. Should the graph concept have a notion of atomic multi-triple
-   transactions? Sync, for instance, clears all triples for a root and
-   reinserts. Without atomicity, this is a window of inconsistency.
+1. **Transaction boundaries**: Partially resolved: AssertBatch provides
+   atomic multi-triple writes. No general transaction API yet.
 
-2. **`search` placement**: substring search over object values is arguably
-   a graph-ops concern, not a bare storage concern. It could move to layer 2.
-   Left here for now because it's predicate-unaware -- it doesn't need
-   metadata about the predicate, just a string match.
+2. **`search` placement**: Resolved: search stays in Layer 1. It's
+   predicate-unaware string matching, not a graph operation.

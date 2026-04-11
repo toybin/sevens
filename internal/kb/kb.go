@@ -130,6 +130,12 @@ func (k *KB) SetRole(ctx context.Context, root, title, role string) error {
 	})
 }
 
+// RegisterRoot stores a root registration in the graph as triples.
+func (k *KB) RegisterRoot(ctx context.Context, root string) error {
+	subject := "root:" + rootHash(root)
+	return k.graph.Set(ctx, subject, "root/path", root)
+}
+
 // ClearRoot retracts all node and block triples belonging to a root.
 func (k *KB) ClearRoot(ctx context.Context, root string) error {
 	if err := k.graph.RetractSubgraph(ctx, PredNodeRoot, root); err != nil {

@@ -17,6 +17,17 @@ type ResolvedContext struct {
 	Paths       map[string][]string        // keyed by PathSpec.As -> resolved titles
 	PrevStep    string                     // output from the prior step
 	Instruction string                     // ad-hoc instruction from user
+	Block       *BlockContext              // optional block target
+	History     string                     // formatted history
+}
+
+// BlockContext holds resolved data for a block-targeted step.
+type BlockContext struct {
+	Path     string
+	Kind     string
+	Text     string
+	Markdown string
+	Scope    string
 }
 
 // ResolveContext gathers graph context for a step based on its Requires and Paths.
@@ -115,6 +126,15 @@ func RenderPrompt(template string, rc *ResolvedContext) string {
 	result = strings.ReplaceAll(result, "{{prev}}", rc.PrevStep)
 	result = strings.ReplaceAll(result, "{{timestamp}}", time.Now().UTC().Format("2006-01-02T15:04:05Z"))
 	result = strings.ReplaceAll(result, "{{instruction}}", rc.Instruction)
+
+	if rc.Block != nil {
+		result = strings.ReplaceAll(result, "{{block.path}}", rc.Block.Path)
+		result = strings.ReplaceAll(result, "{{block.kind}}", rc.Block.Kind)
+		result = strings.ReplaceAll(result, "{{block.text}}", rc.Block.Text)
+		result = strings.ReplaceAll(result, "{{block.markdown}}", rc.Block.Markdown)
+		result = strings.ReplaceAll(result, "{{block.scope}}", rc.Block.Scope)
+	}
+	result = strings.ReplaceAll(result, "{{history}}", rc.History)
 
 	// Resolve role-based placeholders: {{role.title}}, {{role.content}}
 	for key, walk := range rc.Roles {

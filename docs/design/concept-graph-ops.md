@@ -87,12 +87,10 @@ The graph (layer 1) doesn't enforce these specs. Layer 2 uses them to
 provide correct operations. Asserting a triple with an unregistered
 predicate is fine at layer 1 -- layer 2 just won't know its properties.
 
-**Open question**: should PredicateSpecs be stored as triples in the
-graph itself (self-describing, eating its own tail) or as separate state?
-Storing as triples is elegant and consistent with the "everything is
-triples" philosophy. But it creates a bootstrap problem: you need
-predicate metadata to correctly operate on predicates, including the
-predicate-metadata predicates.
+**Bootstrap question (resolved)**: predicate specs are stored in-memory
+(Go map), not as triples. Avoids the bootstrap problem. Specs are
+registered programmatically during KB initialization, not via graph
+mutations.
 
 ---
 
@@ -105,7 +103,10 @@ actions:
     effects: adds or updates the predicate specification.
 
   set (subject: String, predicate: String, object: String): ()
-    requires: predicate is registered as functional.
+    requires: predicate is registered as functional, OR predicate has
+    no registered spec (unregistered predicates are allowed; no error
+    is raised). Errors only if a spec exists AND the predicate is
+    Relational (multiplicity mismatch).
     effects: retracts all triples with the given (subject, predicate)
     via Graph.retract, then asserts the new triple via Graph.assert.
     Ensures functional predicates have at most one value.
@@ -185,9 +186,9 @@ different directions.
 
 ## Open Questions
 
-1. **Bootstrap problem**: if predicate specs are stored as triples, the
-   predicates used to store predicate specs (e.g., `predicate/multiplicity`)
-   need their own specs. Is this a real problem or a one-time base case?
+1. **Bootstrap problem**: Resolved: predicate specs are stored in-memory
+   (Go map), not as triples. Avoids bootstrap problem. Specs are registered
+   programmatically during KB initialization.
 
 2. **Symmetric auto-assertion**: if a predicate is symmetric, should `set`
    or `assert` automatically create the reverse triple? Or should that be

@@ -89,7 +89,15 @@ predicates:
   log/timestamp    functional    "when this operation occurred"
   log/session      functional    "which session this occurred in"
   log/result       functional    "the output or summary of the operation"
+  log/commit       functional    "git commit hash associated with this entry"
+  log/note         functional    "human-readable annotation on this entry"
+  log/files-created  functional  "files created during this operation"
+  log/files-edited   functional  "files edited during this operation"
 ```
+
+**Note**: the predicate count is approximately 32, including the four
+`log/*` extras above (log/commit, log/note, log/files-created,
+log/files-edited).
 
 **Discussion notes**:
 
@@ -230,10 +238,18 @@ actions:
     effects: uses GraphOps.set on node/content and updates
     node/char-count.
 
+  setRole (root: String, title: String, role: String): ()
+    requires: node with the given (root, title) exists.
+    effects: asserts (subject, node/role, role).
+
   registerRoot (path: String): (rootHash: String)
     requires: path is a valid directory.
     effects: computes the root hash, registers in the root registry.
     Returns the hash for use in subject construction.
+
+    **Note**: registerRoot is not yet implemented in the KnowledgeBase
+    concept. It currently lives in the old store package and has not
+    been migrated.
 ```
 
 **Discussion notes**:
@@ -363,17 +379,13 @@ This is where K's derived structure becomes concrete:
 
 ## Open Questions
 
-1. **Delete semantics**: when a node with children is deleted, what
-   happens to the children? Options: cascade (delete them too), orphan
-   (remove their parent predicate, validation catches them), refuse
-   (require children to be moved or deleted first), reparent (attach
-   to grandparent). This might vary by use case, suggesting it should
-   be parameterized or a sync-level decision.
+1. **Delete semantics**: Resolved: refuse if node has children. Caller
+   must move or delete children first.
 
-2. **Rename semantics**: renaming a node changes its subject (since
-   subjects are derived from title). All triples referencing the old
-   subject must be rewritten. Is this an action of this concept, or
-   should identity be decoupled from title?
+2. **Rename semantics**: Unresolved in code. Renaming would require
+   rewriting all triples referencing the old subject (since subject
+   identity is derived from title). No rename action is currently
+   implemented.
 
 3. **Resolved: block/node predicate namespaces.** Separate namespaces,
    same underlying thing. `block/*` and `node/*` are labels on

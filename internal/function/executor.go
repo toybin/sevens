@@ -53,6 +53,14 @@ func (e *Executor) Accept(ctx context.Context, root string, fn *Function, pipeli
 		return nil, err
 	}
 
+	_ = e.KB.AppendLog(ctx, kb.LogEntry{
+		Event:     "accepted",
+		Root:      root,
+		Function:  fn.Name,
+		Node:      p.Target,
+		Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+	})
+
 	steps := fn.EffectiveSteps()
 	completed, err := p.Advance(len(steps))
 	if err != nil {
@@ -86,6 +94,14 @@ func (e *Executor) Reject(ctx context.Context, pipelineID string) (*Pipeline, er
 	if err := p.Reject(); err != nil {
 		return nil, err
 	}
+
+	_ = e.KB.AppendLog(ctx, kb.LogEntry{
+		Event:     "rejected",
+		Root:      p.Root,
+		Function:  p.FunctionName,
+		Node:      p.Target,
+		Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+	})
 
 	if err := e.Store.Save(ctx, p); err != nil {
 		return nil, err
@@ -140,6 +156,14 @@ func (e *Executor) Revise(ctx context.Context, root string, fn *Function, pipeli
 		return nil, err
 	}
 
+	_ = e.KB.AppendLog(ctx, kb.LogEntry{
+		Event:     "revised",
+		Root:      root,
+		Function:  fn.Name,
+		Node:      p.Target,
+		Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+	})
+
 	if err := e.Store.Save(ctx, p); err != nil {
 		return nil, err
 	}
@@ -162,6 +186,14 @@ func (e *Executor) Cancel(ctx context.Context, fn *Function, pipelineID string) 
 	if err := p.Cancel(steps[p.CurrentStep]); err != nil {
 		return nil, err
 	}
+
+	_ = e.KB.AppendLog(ctx, kb.LogEntry{
+		Event:     "cancelled",
+		Root:      p.Root,
+		Function:  fn.Name,
+		Node:      p.Target,
+		Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+	})
 
 	if err := e.Store.Save(ctx, p); err != nil {
 		return nil, err
@@ -201,6 +233,14 @@ func (e *Executor) EndLoop(ctx context.Context, root string, fn *Function, pipel
 	if err := p.EndLoop(); err != nil {
 		return nil, err
 	}
+
+	_ = e.KB.AppendLog(ctx, kb.LogEntry{
+		Event:     "loop-ended",
+		Root:      root,
+		Function:  fn.Name,
+		Node:      p.Target,
+		Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+	})
 
 	// Now in Accepted phase; advance to next step or complete
 	steps := fn.EffectiveSteps()

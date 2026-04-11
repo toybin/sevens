@@ -105,6 +105,8 @@ state:
       -- determines which subsequent step to take
     a branchTargets lone map of (String -> StepDef)
       -- for branch: output value -> next step
+      -- NOTE: FlowBranch is defined in types but not exercised in
+      -- tests or the pipeline executor.
 
   a set of Signatures with
     a shape one of (text, structured, file-ops)
@@ -130,6 +132,7 @@ state:
       -- if true, skip review and apply immediately
     a rollbackOnReject Boolean
       -- if true, rejecting undoes prior accepted steps
+      -- NOTE: declared but not yet enforced in the pipeline executor.
 
   -- pipeline state (live, mutable, owned by this concept)
   a set of Pipelines with
@@ -528,18 +531,21 @@ collapse into configurations of the function concept:
 - **Suspension**: the Pending/Accepted/Rejected pipeline state at
   gated steps. Not a separate concept -- it's the review sub-machine
   at each curry point. Pipeline state persistence replaces the old
-  `suspension:*` triples.
+  `suspension:*` triples. **Status: fully absorbed.**
 
 - **Discussion**: a function with a single looping step
   (user-terminated, append accumulator, cancelable). Each iteration
   produces a conversation turn. The transcript is the accumulating
-  result. `.end` commits, `.cancel` rolls back.
+  result. `.end` commits, `.cancel` rolls back. **Status: absorbed
+  (looping step implemented).**
 
 - **Templates**: deterministic functions. The template definition is a
   function with a deterministic backend spec instead of an LLM prompt.
   Same signature, same pipeline machinery, same output validation. A
   template that creates multiple nodes with a review step is a gated
-  deterministic pipeline.
+  deterministic pipeline. **Status: partially absorbed -- the old
+  template system is still active via convert.go bridge. Migration to
+  the function concept is incomplete.**
 
 This reduces the concept count significantly. The function concept is
 large but coherent: it's all "typed transformations on the knowledge
