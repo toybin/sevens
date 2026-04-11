@@ -54,10 +54,14 @@ func resolveRoot(explicit string) (string, error) {
 	if err == nil {
 		return root, nil
 	}
-	// No .sevens.edn found — try the active focus session
-	session, sErr := apply.LoadSession()
-	if sErr == nil && session != nil {
-		return session.Root, nil
+	// No .sevens.edn found — try the active focus session from DB
+	stack, sErr := openKB()
+	if sErr == nil {
+		defer stack.Close()
+		sess, lErr := stack.KB.LoadCurrentSession(context.Background())
+		if lErr == nil && sess != nil {
+			return sess.Root, nil
+		}
 	}
 	return "", err // return the original FindRoot error
 }
@@ -66,14 +70,19 @@ func resolveNodeTitle(title string) (string, error) {
 	if title != "." {
 		return title, nil
 	}
-	session, err := apply.LoadSession()
+	stack, err := openKB()
+	if err != nil {
+		return "", fmt.Errorf("opening KB: %w", err)
+	}
+	defer stack.Close()
+	session, err := stack.KB.LoadCurrentSession(context.Background())
 	if err != nil {
 		return "", fmt.Errorf("loading session: %w", err)
 	}
 	if session == nil {
 		return "", fmt.Errorf("no active focus session — use 'sevens focus <node>' first")
 	}
-	return session.NodeTitle, nil
+	return session.Focus, nil
 }
 
 func syncRoot(rootDir string) error {
@@ -1839,15 +1848,8 @@ func focusCmd() *cobra.Command {
 				return fmt.Errorf("walking node: %w", err)
 			}
 
-			// Still persist to EDN file for REPL compat
-			session := &apply.Session{
-				Root:      resolved,
-				NodeTitle: nodeTitle,
-				CreatedAt: time.Now().UTC().Format(time.RFC3339),
-				Includes:  includes,
-				Excludes:  excludes,
-			}
-			if err := apply.SaveSession(session); err != nil {
+			// Persist session as triples in the DB
+			if err := stack.KB.SaveCurrentSession(context.Background(), resolved, nodeTitle, includes, excludes); err != nil {
 				return fmt.Errorf("saving session: %w", err)
 			}
 
@@ -1880,15 +1882,21 @@ func unfocusCmd() *cobra.Command {
 		Use:   "unfocus",
 		Short: "Clear the active focus session",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			session, _ := apply.LoadSession()
+			stack, err := openKB()
+			if err != nil {
+				return err
+			}
+			defer stack.Close()
+
+			session, _ := stack.KB.LoadCurrentSession(context.Background())
 			if session == nil {
 				fmt.Fprintln(os.Stderr, "No active focus session")
 				return nil
 			}
-			if err := apply.ClearSession(); err != nil {
+			if err := stack.KB.ClearCurrentSession(context.Background()); err != nil {
 				return fmt.Errorf("clearing session: %w", err)
 			}
-			fmt.Fprintf(os.Stderr, "%s Cleared focus on %s\n", ui.Success.Render("[unfocus]"), ui.NodeTitle.Render(session.NodeTitle))
+			fmt.Fprintf(os.Stderr, "%s Cleared focus on %s\n", ui.Success.Render("[unfocus]"), ui.NodeTitle.Render(session.Focus))
 			return nil
 		},
 	}
@@ -1899,7 +1907,13 @@ func statusCmd() *cobra.Command {
 		Use:   "status",
 		Short: "Show current focus session and pending state",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			session, err := apply.LoadSession()
+			stack, err := openKB()
+			if err != nil {
+				return err
+			}
+			defer stack.Close()
+
+			session, err := stack.KB.LoadCurrentSession(context.Background())
 			if err != nil {
 				return fmt.Errorf("loading session: %w", err)
 			}
@@ -1907,9 +1921,9 @@ func statusCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "No active focus session")
 				return nil
 			}
-			fmt.Printf("%s %s\n", ui.Label.Render("Focused:"), ui.NodeTitle.Render(session.NodeTitle))
+			fmt.Printf("%s %s\n", ui.Label.Render("Focused:"), ui.NodeTitle.Render(session.Focus))
 			fmt.Printf("%s %s\n", ui.Dim.Render("Root:"), ui.Dim.Render(session.Root))
-			fmt.Printf("%s %s\n", ui.Dim.Render("Since:"), ui.Dim.Render(session.CreatedAt))
+			fmt.Printf("%s %s\n", ui.Dim.Render("Since:"), ui.Dim.Render(session.Started))
 			if len(session.Includes) > 0 {
 				fmt.Printf("%s %s\n", ui.Dim.Render("Includes:"), strings.Join(session.Includes, ", "))
 			}
@@ -2002,10 +2016,10 @@ func queryCmd() *cobra.Command {
 			}
 
 			// Also bind focus session if active
-			session, _ := apply.LoadSession()
-			if session != nil {
-				bindings["target"] = session.NodeTitle
-				bindings["focused"] = session.NodeTitle
+			sess, _ := stack.KB.LoadCurrentSession(context.Background())
+			if sess != nil {
+				bindings["target"] = sess.Focus
+				bindings["focused"] = sess.Focus
 			}
 
 			// Substitute template variables into the SQL query

@@ -12,9 +12,10 @@ import (
 // Session represents a working context.
 type Session struct {
 	Subject  string
-	Focus    string   // node subject
-	Includes []string // node subjects
-	Excludes []string // node subjects
+	Root     string   // root directory path
+	Focus    string   // node title (for current session) or subject
+	Includes []string // node titles or subjects
+	Excludes []string // node titles or subjects
 	Started  string
 	Ended    string
 }
@@ -85,6 +86,57 @@ func (k *KB) LoadSession(ctx context.Context, sessionSubject string) (*Session, 
 	s.Excludes = excludes
 
 	return s, nil
+}
+
+// SaveCurrentSession writes the active session to the DB using a
+// well-known subject. Only one session is active at a time.
+func (k *KB) SaveCurrentSession(ctx context.Context, root, nodeTitle string, includes, excludes []string) error {
+	// Clear previous session
+	k.graph.Store().RetractBySubject(ctx, CurrentSessionSubject)
+
+	triples := []triple.Triple{
+		{Subject: CurrentSessionSubject, Predicate: "session/root", Object: root},
+		{Subject: CurrentSessionSubject, Predicate: PredSessionFocus, Object: nodeTitle},
+		{Subject: CurrentSessionSubject, Predicate: PredSessionStarted, Object: time.Now().UTC().Format(time.RFC3339)},
+	}
+	for _, inc := range includes {
+		triples = append(triples, triple.Triple{Subject: CurrentSessionSubject, Predicate: PredSessionInclude, Object: inc})
+	}
+	for _, exc := range excludes {
+		triples = append(triples, triple.Triple{Subject: CurrentSessionSubject, Predicate: PredSessionExclude, Object: exc})
+	}
+	return k.graph.Store().AssertBatch(ctx, triples)
+}
+
+// LoadCurrentSession reads the active session from the DB.
+// Returns nil if no session is active.
+func (k *KB) LoadCurrentSession(ctx context.Context) (*Session, error) {
+	focus, ok, err := k.graph.Lookup(ctx, CurrentSessionSubject, PredSessionFocus)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+
+	root, _, _ := k.graph.Lookup(ctx, CurrentSessionSubject, "session/root")
+	started, _, _ := k.graph.Lookup(ctx, CurrentSessionSubject, PredSessionStarted)
+	includes, _ := k.graph.Store().BySubjectPredicate(ctx, CurrentSessionSubject, PredSessionInclude)
+	excludes, _ := k.graph.Store().BySubjectPredicate(ctx, CurrentSessionSubject, PredSessionExclude)
+
+	return &Session{
+		Subject:  CurrentSessionSubject,
+		Focus:    focus,
+		Includes: includes,
+		Excludes: excludes,
+		Started:  started,
+		Root:     root,
+	}, nil
+}
+
+// ClearCurrentSession removes the active session.
+func (k *KB) ClearCurrentSession(ctx context.Context) error {
+	return k.graph.Store().RetractBySubject(ctx, CurrentSessionSubject)
 }
 
 func sessionSubject() string {

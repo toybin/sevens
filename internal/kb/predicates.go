@@ -42,6 +42,10 @@ const (
 	PredSessionExclude = "session/exclude"
 	PredSessionStarted = "session/started"
 	PredSessionEnded   = "session/ended"
+
+	// CurrentSessionSubject is the well-known subject for the active session.
+	// Only one session is active at a time.
+	CurrentSessionSubject = "session:current"
 )
 
 // Log predicates
