@@ -50,7 +50,7 @@ func resolveRoot(explicit string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("getting working directory: %w", err)
 	}
-	root, err := graph.FindRoot(cwd)
+	root, err := projmd.FindRoot(cwd)
 	if err == nil {
 		return root, nil
 	}
@@ -424,13 +424,13 @@ func completeNodeTitles(cmd *cobra.Command, args []string, toComplete string) ([
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 
-	db, err := openDB()
+	stack, err := openKB()
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
-	defer db.Close()
+	defer stack.Close()
 
-	titles, err := store.ListNodeTitles(db, resolved)
+	titles, err := stack.KB.ListNodeTitles(context.Background(), resolved)
 	if err != nil {
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
@@ -465,7 +465,7 @@ func syncCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("getting working directory: %w", err)
 				}
-				r, err := graph.FindRoot(cwd)
+				r, err := projmd.FindRoot(cwd)
 				if err != nil {
 					// No .sevens.edn found walking up — sync all registered roots
 					return syncAllRoots()

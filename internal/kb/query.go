@@ -277,6 +277,21 @@ func (k *KB) Validate(ctx context.Context, root string, maxChildren, maxContentL
 	return violations, nil
 }
 
+// ListNodeTitles returns all node titles in a root.
+func (k *KB) ListNodeTitles(ctx context.Context, root string) ([]string, error) {
+	subjects, err := k.graph.Store().ByPredicateObject(ctx, PredNodeRoot, root)
+	if err != nil {
+		return nil, err
+	}
+	var titles []string
+	for _, subj := range subjects {
+		if t, ok, _ := k.graph.Lookup(ctx, subj, PredNodeTitle); ok && t != "" {
+			titles = append(titles, t)
+		}
+	}
+	return titles, nil
+}
+
 // --- Helpers ---
 
 // resolveTitle looks up the title for a subject.

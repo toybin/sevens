@@ -15,6 +15,8 @@ import (
 	"sevens/internal/backend"
 	"sevens/internal/engine"
 	"sevens/internal/function"
+	"sevens/internal/projection"
+	projmd "sevens/internal/projection/md"
 	"sevens/internal/ui"
 )
 
@@ -224,23 +226,21 @@ func acceptCmd2() *cobra.Command {
 			} else {
 				// Pipeline completed
 				if result.Result != nil && len(result.Result.Ops) > 0 {
-					// Execute file ops
-					db, err := openDB()
-					if err != nil {
-						return err
+					// Execute file ops via projection
+					proj := openProjection(stack)
+					projOps := make([]projection.FileOp, len(result.Result.Ops))
+					for i, op := range result.Result.Ops {
+						projOps[i] = projection.FileOp(op)
 					}
-					defer db.Close()
-
-					ops := convertOps(result.Result.Ops)
-					created, edited, err := apply.ExecuteOps(ops, resolved, db)
+					applyResult, err := proj.ApplyOps(context.Background(), resolved, projOps)
 					if err != nil {
 						return fmt.Errorf("executing ops: %w", err)
 					}
 
-					if apply.IsGitRepo(resolved) {
-						allFiles := append(created, edited...)
+					if projmd.IsGitRepo(resolved) {
+						allFiles := append(applyResult.FilesCreated, applyResult.FilesEdited...)
 						if len(allFiles) > 0 {
-							_, gerr := apply.CommitFiles(resolved,
+							_, gerr := projmd.CommitFiles(resolved,
 								fmt.Sprintf("sevens: apply %s to %q", pipeline.FunctionName, pipeline.Target),
 								allFiles)
 							if gerr != nil {
@@ -452,24 +452,8 @@ func displayApplyResult(result *function.ApplyResult, fn *function.Function, nod
 	}
 }
 
-// convertOps converts function.FileOp to apply.FileOp for execution.
-func convertOps(ops []function.FileOp) []apply.FileOp {
-	result := make([]apply.FileOp, len(ops))
-	for i, op := range ops {
-		result[i] = apply.FileOp{
-			Action:  op.Action,
-			Title:   op.Title,
-			Parent:  op.Parent,
-			File:    op.File,
-			OldText: op.OldText,
-			NewText: op.NewText,
-			Content: op.Content,
-		}
-	}
-	return result
-}
-
 // runLegacyAccept falls back to the old engine.Suspension-based accept.
+// TODO: remove once all old suspensions are cleared from user databases.
 func runLegacyAccept(resolved, arg, with string, confirm bool, backendFlag string) error {
 	db, err := openDB()
 	if err != nil {
@@ -679,6 +663,7 @@ func runLegacyAccept(resolved, arg, with string, confirm bool, backendFlag strin
 }
 
 // runLegacyReject falls back to the old engine.Suspension-based reject.
+// TODO: remove once all old suspensions are cleared from user databases.
 func runLegacyReject(resolved, arg string) error {
 	db, err := openDB()
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"olympos.io/encoding/edn"
 	"sevens/internal/kb"
 	"sevens/internal/projection"
 	"sevens/internal/triple"
@@ -169,6 +170,68 @@ func editFile(root string, op projection.FileOp, k *kb.KB) (string, error) {
 
 	content = strings.Replace(content, op.OldText, op.NewText, 1)
 	return filePath, os.WriteFile(filePath, []byte(content), 0644)
+}
+
+// --- Root discovery ---
+
+// FindRoot walks up from dir to find the nearest .sevens.edn file.
+func FindRoot(dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolving path %s: %w", dir, err)
+	}
+	current := abs
+	for {
+		candidate := filepath.Join(current, ".sevens.edn")
+		if _, err := os.Stat(candidate); err == nil {
+			return current, nil
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf("no .sevens.edn found in %s or any parent directory", abs)
+		}
+		current = parent
+	}
+}
+
+// LoadConfig reads and parses the .sevens.edn config file in root.
+func LoadConfig(root string) (Config, error) {
+	data, err := os.ReadFile(filepath.Join(root, ".sevens.edn"))
+	if err != nil {
+		return Config{}, fmt.Errorf("reading .sevens.edn in %s: %w", root, err)
+	}
+	var cfg Config
+	if err := edn.Unmarshal(data, &cfg); err != nil {
+		return Config{}, fmt.Errorf("parsing .sevens.edn in %s: %w", root, err)
+	}
+	cfg.Path = expandTilde(cfg.Path)
+	return cfg, nil
+}
+
+// Config holds the parsed .sevens.edn configuration.
+type Config struct {
+	Path     string           `edn:"path"`
+	Alias    string           `edn:"alias"`
+	MaxChars *int             `edn:"max-chars"`
+	Groups   map[string]Group `edn:"groups"`
+}
+
+// Group defines a subgraph that can be included as context.
+type Group struct {
+	Root    string   `edn:"root"`
+	Exclude []string `edn:"exclude"`
+	Nodes   []string `edn:"nodes"`
+}
+
+func expandTilde(path string) string {
+	if !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	return filepath.Join(home, path[2:])
 }
 
 // --- Scanning and parsing ---
