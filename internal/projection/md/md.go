@@ -285,6 +285,7 @@ func ParseFiles(files []string) ([]ParsedNode, []string) {
 			CrossRefs:    ExtractWikiLinks(body),
 			SiblingRole:  fm.SiblingRole,
 			IncludeGroup: fm.IncludeGroup,
+			Blocks:       ExtractBlocks(body),
 		}
 		if fm.Parent != "" {
 			node.Parent = &fm.Parent
@@ -317,6 +318,22 @@ func nodeToTriples(node ParsedNode, root string) []triple.Triple {
 
 	if node.SiblingRole != "" {
 		triples = append(triples, triple.Triple{Subject: subj, Predicate: kb.PredNodeRole, Object: node.SiblingRole})
+	}
+
+	// Block triples: blocks are nodes in the graph with block/* predicates.
+	for _, block := range node.Blocks {
+		blockSubj := kb.BlockSubject(root, node.Title, block.Path)
+		triples = append(triples,
+			triple.Triple{Subject: blockSubj, Predicate: kb.PredBlockNode, Object: subj},
+			triple.Triple{Subject: blockSubj, Predicate: kb.PredBlockRoot, Object: root},
+			triple.Triple{Subject: blockSubj, Predicate: kb.PredBlockPath, Object: block.Path},
+			triple.Triple{Subject: blockSubj, Predicate: kb.PredBlockKind, Object: block.Kind},
+			triple.Triple{Subject: blockSubj, Predicate: kb.PredBlockContent, Object: block.Text},
+		)
+		if len(block.HeadingChain) > 0 {
+			scope := ScopeString(VisibleBlockScope(block.Kind, block.Text, block.HeadingChain))
+			triples = append(triples, triple.Triple{Subject: blockSubj, Predicate: kb.PredBlockScope, Object: scope})
+		}
 	}
 
 	return triples

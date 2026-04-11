@@ -9,6 +9,16 @@ import (
 	"strings"
 )
 
+// ParsedBlock is a structural element within a markdown document.
+type ParsedBlock struct {
+	Path         string   // dotted path e.g. "0.1.2"
+	Kind         string   // heading, paragraph, list-item, task
+	Text         string   // plain-text content of the block
+	Level        int      // heading level (1-6), 0 for non-headings
+	Signifier    string   // task signifier e.g. "x", "!!"
+	HeadingChain []string // scope: list of headings above this block
+}
+
 // ParsedNode is a fully parsed markdown file.
 type ParsedNode struct {
 	Title        string
@@ -18,6 +28,7 @@ type ParsedNode struct {
 	CrossRefs    []string
 	SiblingRole  string
 	IncludeGroup bool
+	Blocks       []ParsedBlock
 }
 
 // Frontmatter is the YAML header of a markdown file.

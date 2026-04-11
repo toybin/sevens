@@ -19,7 +19,6 @@ import (
 	"sevens/internal/backend"
 	"sevens/internal/config"
 	"sevens/internal/function"
-	"sevens/internal/graph"
 	"sevens/internal/kb"
 	"sevens/internal/projection"
 	projmd "sevens/internal/projection/md"
@@ -609,7 +608,8 @@ func diffBlocksCmd() *cobra.Command {
 			}
 			defer stack.Close()
 
-			output, err := graph.BuildBlockDiff(stack.Store.DB(), resolved, nodeTitle)
+			proj := openProjection(stack)
+			output, err := proj.DiffBlocks(context.Background(), resolved, nodeTitle)
 			if err != nil {
 				return err
 			}
@@ -622,7 +622,7 @@ func diffBlocksCmd() *cobra.Command {
 			fmt.Println(ui.Dim.Render(output.FilePath))
 			fmt.Println(ui.Separator.Render(strings.Repeat("─", 60)))
 
-			printGroup := func(label string, entries []graph.BlockDiffEntry) {
+			printGroup := func(label string, entries []projmd.BlockChange) {
 				if len(entries) == 0 {
 					return
 				}
@@ -639,8 +639,8 @@ func diffBlocksCmd() *cobra.Command {
 					if entry.OldPath != "" && entry.NewPath != "" && entry.OldPath != entry.NewPath {
 						fmt.Printf("    %s %s -> %s\n", ui.Dim.Render("path:"), entry.OldPath, entry.NewPath)
 					}
-					oldScope := graph.ScopeString(entry.OldScope)
-					newScope := graph.ScopeString(entry.NewScope)
+					oldScope := entry.OldScope
+					newScope := entry.NewScope
 					if oldScope != "" || newScope != "" {
 						if oldScope == newScope || newScope == "" {
 							fmt.Printf("    %s %s\n", ui.Dim.Render("scope:"), orDefault(oldScope, newScope))
@@ -656,15 +656,11 @@ func diffBlocksCmd() *cobra.Command {
 				printGroup("Unchanged", output.Unchanged)
 			}
 			printGroup("Edited", output.Edited)
-			printGroup("Scope Changed", output.ScopeChanged)
-			printGroup("Reordered", output.Reordered)
 			printGroup("Inserted", output.Inserted)
 			printGroup("Deleted", output.Deleted)
 
 			if !showUnchanged &&
 				len(output.Edited) == 0 &&
-				len(output.ScopeChanged) == 0 &&
-				len(output.Reordered) == 0 &&
 				len(output.Inserted) == 0 &&
 				len(output.Deleted) == 0 {
 				fmt.Println(ui.Dim.Render("No block changes"))
@@ -706,36 +702,33 @@ func blocksCmd() *cobra.Command {
 			}
 			defer stack.Close()
 
-			output, err := graph.BuildBlockList(stack.Store.DB(), resolved, nodeTitle)
+			blocks, err := stack.KB.ListBlocks(context.Background(), resolved, nodeTitle)
 			if err != nil {
 				return err
 			}
+
 			if ednOutput {
-				return printEDN(output)
+				return printEDN(blocks)
 			}
 
-			fmt.Println(ui.NodeTitle.Render(output.NodeTitle))
-			fmt.Println(ui.Dim.Render(output.FilePath))
+			fmt.Println(ui.NodeTitle.Render(nodeTitle))
 			fmt.Println(ui.Separator.Render(strings.Repeat("─", 60)))
-			for _, block := range output.Blocks {
-				text := summarizeInline(block.Text, 88)
+			for _, block := range blocks {
+				text := summarizeInline(block.Content, 88)
 				label := block.Kind
 				if block.Kind == "heading" {
 					label = fmt.Sprintf("h%d", block.Level)
-				}
-				if block.Kind == "task" && block.Signifier != "" {
-					label = fmt.Sprintf("task[%s]", block.Signifier)
 				}
 				fmt.Printf("  %s  %s  %s\n",
 					ui.Dim.Render(fmt.Sprintf("%-6s", block.Path)),
 					ui.Label.Render(fmt.Sprintf("%-10s", label)),
 					text,
 				)
-				if len(block.Scope) > 0 {
-					fmt.Printf("          %s %s\n", ui.Dim.Render("scope:"), ui.Dim.Render(graph.ScopeString(block.Scope)))
+				if block.Scope != "" {
+					fmt.Printf("          %s %s\n", ui.Dim.Render("scope:"), ui.Dim.Render(block.Scope))
 				}
 			}
-			if len(output.Blocks) == 0 {
+			if len(blocks) == 0 {
 				fmt.Println(ui.Dim.Render("No blocks"))
 			}
 			return nil
@@ -773,22 +766,22 @@ func inboxCmd() *cobra.Command {
 			}
 			defer stack.Close()
 
-			output, err := graph.BuildInboxOverview(stack.Store.DB(), resolved, nodeTitle)
+			items, err := stack.KB.InboxOverview(context.Background(), resolved, nodeTitle)
 			if err != nil {
 				return err
 			}
 
 			if ednOutput {
-				return printEDN(output)
+				return printEDN(items)
 			}
 
-			fmt.Println(ui.NodeTitle.Render(output.NodeTitle))
+			fmt.Println(ui.NodeTitle.Render(nodeTitle))
 			fmt.Println(ui.Separator.Render(strings.Repeat("─", 60)))
-			if len(output.Items) == 0 {
+			if len(items) == 0 {
 				fmt.Println(ui.Dim.Render("No child notes"))
 				return nil
 			}
-			for _, item := range output.Items {
+			for _, item := range items {
 				fmt.Printf("  %s  %s\n", ui.Label.Render(fmt.Sprintf("%-12s", item.Kind)), ui.NodeTitle.Render(item.Title))
 				var parts []string
 				if item.Empty {
@@ -801,9 +794,6 @@ func inboxCmd() *cobra.Command {
 				}
 				if item.HeadingCount > 0 {
 					parts = append(parts, fmt.Sprintf("%d headings", item.HeadingCount))
-				}
-				if item.Error != "" {
-					parts = append(parts, "error: "+item.Error)
 				}
 				fmt.Printf("    %s\n", ui.Dim.Render(strings.Join(parts, " · ")))
 			}
@@ -844,18 +834,44 @@ func extractBlockCmd() *cobra.Command {
 			}
 			defer stack.Close()
 
-			db := stack.Store.DB()
-			extracted, err := graph.PrepareBlockExtraction(db, resolved, sourceTitle, blockPath, newTitle, parent)
+			// Resolve the source node's file to parse blocks from disk
+			nodeSubj := kb.NodeSubject(resolved, sourceTitle)
+			filePath, ok, _ := stack.KB.Graph().Lookup(context.Background(), nodeSubj, kb.PredNodeFile)
+			if !ok || filePath == "" {
+				return fmt.Errorf("node %q has no file path", sourceTitle)
+			}
+			fileData, err := os.ReadFile(filePath)
+			if err != nil {
+				return fmt.Errorf("reading source file: %w", err)
+			}
+			_, body := projmd.ParseFrontmatter(string(fileData))
+			blocks := projmd.ExtractBlocks(body)
+
+			block, idx, err := projmd.FindBlockByPath(blocks, blockPath)
 			if err != nil {
 				return err
 			}
 
+			if parent == "" {
+				parent = sourceTitle
+			}
+			if strings.TrimSpace(newTitle) == "" {
+				if block.Kind == "heading" {
+					newTitle = block.Text
+				} else {
+					return fmt.Errorf("title required for block %s (%s)", block.Path, block.Kind)
+				}
+			}
+
+			selected := projmd.SelectExtractedBlocks(blocks, idx)
+			content := projmd.RenderExtractedContent(sourceTitle, block, selected)
+
 			proj := openProjection(stack)
 			projOps := []projection.FileOp{{
 				Action:  "create",
-				Title:   newTitle,
+				Title:   strings.TrimSpace(newTitle),
 				Parent:  parent,
-				Content: "# " + extracted.Title + "\n\n" + extracted.Content,
+				Content: "# " + strings.TrimSpace(newTitle) + "\n\n" + content,
 			}}
 			projResult, err := proj.ApplyOps(context.Background(), resolved, projOps)
 			if err != nil {
@@ -865,7 +881,7 @@ func extractBlockCmd() *cobra.Command {
 				fmt.Fprintf(os.Stderr, "%s Created: %s\n", ui.Success.Render("[extract]"), f)
 			}
 			if projmd.IsGitRepo(resolved) && len(projResult.FilesCreated) > 0 {
-				hash, err := projmd.CommitFiles(resolved, fmt.Sprintf("sevens: extract block %s from %q", blockPath, extracted.SourceTitle), projResult.FilesCreated)
+				hash, err := projmd.CommitFiles(resolved, fmt.Sprintf("sevens: extract block %s from %q", blockPath, sourceTitle), projResult.FilesCreated)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "%s git commit failed: %v\n", ui.Success.Render("[extract]"), err)
 				} else {
@@ -1103,6 +1119,7 @@ func defineCmd() *cobra.Command {
 
 Examine the target node and provide your analysis.
 </instruction>
+
 
 <target-node title="{{title}}" parent="{{parent}}">
 {{content}}
