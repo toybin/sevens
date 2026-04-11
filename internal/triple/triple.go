@@ -172,6 +172,41 @@ func (s *Store) Search(ctx context.Context, predicate, substring string) ([]stri
 	return scanStrings(rows)
 }
 
+// RawQuery executes arbitrary SQL and returns results as string rows.
+// First row is column headers.
+func (s *Store) RawQuery(ctx context.Context, query string, args ...any) ([][]string, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	result := [][]string{cols}
+
+	for rows.Next() {
+		vals := make([]sql.NullString, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		row := make([]string, len(cols))
+		for i, v := range vals {
+			if v.Valid {
+				row[i] = v.String
+			}
+		}
+		result = append(result, row)
+	}
+	return result, rows.Err()
+}
+
 // --- Helpers ---
 
 func scanTriples(rows *sql.Rows) ([]Triple, error) {

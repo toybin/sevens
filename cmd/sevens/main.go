@@ -1825,18 +1825,19 @@ func focusCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			// Verify node exists by building a walk
-			db, err := openDB()
+			// Verify node exists via new KB
+			stack, err := openKB()
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer stack.Close()
 
-			walk, err := graph.BuildWalk(db, resolved, nodeTitle, 1)
+			w, err := stack.KB.Walk(context.Background(), resolved, nodeTitle)
 			if err != nil {
-				return fmt.Errorf("building walk: %w", err)
+				return fmt.Errorf("walking node: %w", err)
 			}
 
+			// Still persist to EDN file for REPL compat
 			session := &apply.Session{
 				Root:      resolved,
 				NodeTitle: nodeTitle,
@@ -1848,17 +1849,15 @@ func focusCmd() *cobra.Command {
 				return fmt.Errorf("saving session: %w", err)
 			}
 
-			// Print summary
-			n := walk.Node
-			fmt.Fprintf(os.Stderr, "%s %s\n", ui.Success.Render("[focus]"), ui.NodeTitle.Render(n.Title))
-			if n.Parent != nil {
-				fmt.Fprintf(os.Stderr, "%s%s\n", ui.Dim.Render("  parent: "), *n.Parent)
+			fmt.Fprintf(os.Stderr, "%s %s\n", ui.Success.Render("[focus]"), ui.NodeTitle.Render(w.Title))
+			if w.Parent != nil {
+				fmt.Fprintf(os.Stderr, "%s%s\n", ui.Dim.Render("  parent: "), *w.Parent)
 			}
-			if len(n.Children) > 0 {
-				fmt.Fprintf(os.Stderr, "%s%s\n", ui.Dim.Render("  children: "), strings.Join(n.Children, ", "))
+			if len(w.Children) > 0 {
+				fmt.Fprintf(os.Stderr, "%s%s\n", ui.Dim.Render("  children: "), strings.Join(w.Children, ", "))
 			}
-			if len(n.Siblings) > 0 {
-				fmt.Fprintf(os.Stderr, "%s%s\n", ui.Dim.Render("  siblings: "), strings.Join(n.Siblings, ", "))
+			if len(w.Siblings) > 0 {
+				fmt.Fprintf(os.Stderr, "%s%s\n", ui.Dim.Render("  siblings: "), strings.Join(w.Siblings, ", "))
 			}
 			if len(includes) > 0 {
 				fmt.Fprintf(os.Stderr, "%s%s\n", ui.Dim.Render("  includes: "), strings.Join(includes, ", "))
@@ -1921,16 +1920,6 @@ func statusCmd() *cobra.Command {
 				fmt.Printf("%s %s\n", ui.Dim.Render("Global context:"), ui.Dim.Render(strings.Join(globalCfg.ContextFiles, ", ")))
 			}
 
-			// Try to get node-level context files (best-effort)
-			db, dErr := openDB()
-			if dErr == nil {
-				defer db.Close()
-				walk, wErr := graph.BuildWalk(db, session.Root, session.NodeTitle, 0)
-				if wErr == nil && len(walk.Node.ContextFiles) > 0 {
-					fmt.Printf("%s %s\n", ui.Dim.Render("Node context:"), ui.Dim.Render(strings.Join(walk.Node.ContextFiles, ", ")))
-				}
-			}
-
 			return nil
 		},
 	}
@@ -1955,19 +1944,17 @@ func logCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			db, err := openDB()
+			stack, err := openKB()
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer stack.Close()
 
-			// Verify the node exists
-			nodeRoot, _ := store.ResolveNode(db, nodeTitle, resolved)
-			if nodeRoot == "" {
+			if subj := stack.KB.Resolve(context.Background(), resolved, nodeTitle); subj == "" {
 				return fmt.Errorf("node not found: %s", nodeTitle)
 			}
 
-			entries, err := apply.ReadLogDB(db, resolved, nodeTitle)
+			entries, err := stack.KB.ReadLog(context.Background(), resolved, nodeTitle)
 			if err != nil {
 				return fmt.Errorf("reading log: %w", err)
 			}
@@ -1978,16 +1965,7 @@ func logCmd() *cobra.Command {
 			}
 
 			for _, e := range entries {
-				fmt.Println(ui.FormatLogEntry(e.Timestamp, e.Event, e.Function, e.Step, e.Commit, e.Note))
-				for _, op := range e.Ops {
-					fmt.Println(ui.FormatOp(op.Action, opName(op)))
-				}
-				if len(e.FilesCreated) > 0 {
-					fmt.Printf("    created: %s\n", strings.Join(e.FilesCreated, ", "))
-				}
-				if len(e.FilesEdited) > 0 {
-					fmt.Printf("    edited: %s\n", strings.Join(e.FilesEdited, ", "))
-				}
+				fmt.Println(ui.FormatLogEntry(e.Timestamp, e.Event, e.Function, e.Step, "", ""))
 			}
 			return nil
 		},
@@ -2011,11 +1989,11 @@ func queryCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			db, err := openDB()
+			stack, err := openKB()
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer stack.Close()
 
 			bindings := map[string]string{
 				"root": resolved,
@@ -2036,7 +2014,7 @@ func queryCmd() *cobra.Command {
 				query = strings.ReplaceAll(query, placeholder, "'"+escaped+"'")
 			}
 
-			results, err := store.RunQuery(db, query)
+			results, err := stack.Store.RawQuery(context.Background(), query)
 			if err != nil {
 				return fmt.Errorf("running query: %w", err)
 			}
