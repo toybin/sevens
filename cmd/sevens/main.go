@@ -19,6 +19,7 @@ import (
 	"sevens/internal/backend"
 	"sevens/internal/engine"
 	"sevens/internal/graph"
+	projmd "sevens/internal/projection/md"
 	"sevens/internal/store"
 	"sevens/internal/ui"
 )
@@ -79,18 +80,14 @@ func syncRoot(rootDir string) error {
 		return fmt.Errorf("resolving root path: %w", err)
 	}
 
-	config, err := graph.LoadConfig(root)
-	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
-	}
-
-	if apply.IsGitRepo(root) {
-		files, err := apply.ChangedFiles(root)
+	// Pre-sync git commit (using new projection/md package)
+	if projmd.IsGitRepo(root) {
+		files, err := projmd.ChangedFiles(root)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s could not check git status: %v\n", ui.Warning.Render("[sync]"), err)
 		}
 		if len(files) > 0 {
-			hash, err := apply.CommitFiles(root, "sevens: sync", files)
+			hash, err := projmd.CommitFiles(root, "sevens: sync", files)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s git commit failed: %v\n", ui.Success.Render("[sync]"), err)
 			} else {
@@ -99,34 +96,42 @@ func syncRoot(rootDir string) error {
 		}
 	}
 
-	db, err := openDB()
+	// Open the new KB stack
+	stack, err := openKB()
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer stack.Close()
 
+	// Register root (still using old store for roots.edn)
 	if err := store.AddRoot(root); err != nil {
 		return fmt.Errorf("updating roots registry: %w", err)
 	}
 
-	files, err := graph.ScanFiles(root)
+	// Sync via new projection
+	proj := openProjection(stack)
+	result, err := proj.Sync(context.Background(), root)
 	if err != nil {
-		return fmt.Errorf("scanning files: %w", err)
+		return fmt.Errorf("syncing: %w", err)
 	}
 
-	nodes, duplicates := graph.ParseAllFiles(files)
-
-	if err := graph.PopulateTriples(db, root, nodes, config); err != nil {
-		return fmt.Errorf("populating triples: %w", err)
-	}
-
-	report, err := graph.Validate(db, root, config)
+	// Validate via new KB
+	violations, err := stack.KB.Validate(context.Background(), root, 9, 0)
 	if err != nil {
-		return fmt.Errorf("validating graph: %w", err)
+		return fmt.Errorf("validating: %w", err)
 	}
-	report.DuplicateTitles = duplicates
 
-	graph.PrintValidationReport(report, len(nodes))
+	// Print results
+	fmt.Fprintf(os.Stderr, "%s scanned %d files, %d triples\n",
+		ui.Success.Render("[sync]"), result.NodesScanned, result.TriplesWritten)
+	for _, e := range result.Errors {
+		fmt.Fprintf(os.Stderr, "%s %s\n", ui.Warning.Render("[sync]"), e)
+	}
+	for _, v := range violations {
+		fmt.Fprintf(os.Stderr, "%s %s: %s — %s\n",
+			ui.Warning.Render("[validate]"), v.Kind, v.Title, v.Detail)
+	}
+
 	return nil
 }
 
@@ -514,30 +519,39 @@ func walkCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			db, err := openDB()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			output, err := graph.BuildWalk(db, resolved, nodeTitle, depth)
-			if err != nil {
-				return fmt.Errorf("building walk: %w", err)
-			}
-
+			// EDN output still uses legacy path for backward compat
 			if ednOutput {
+				db, err := openDB()
+				if err != nil {
+					return err
+				}
+				defer db.Close()
+				output, err := graph.BuildWalk(db, resolved, nodeTitle, depth)
+				if err != nil {
+					return fmt.Errorf("building walk: %w", err)
+				}
 				return printEDN(output)
 			}
 
-			n := output.Node
+			// Non-EDN path uses new KB
+			stack, err := openKB()
+			if err != nil {
+				return err
+			}
+			defer stack.Close()
+
+			w, err := stack.KB.Walk(context.Background(), resolved, nodeTitle)
+			if err != nil {
+				return fmt.Errorf("walking node: %w", err)
+			}
 
 			fmt.Print(ui.FormatNodeHeader(
-				n.Title, n.Parent, n.Role,
-				n.Children, n.Siblings,
-				n.ChildRoles, n.SiblingRoles,
-				n.CrossRefs,
+				w.Title, w.Parent, w.Role,
+				w.Children, w.Siblings,
+				w.ChildRoles, w.SiblingRoles,
+				w.CrossRefs,
 			))
-			fmt.Println(ui.RenderMarkdownOrPlain(n.Content))
+			fmt.Println(ui.RenderMarkdownOrPlain(w.Content))
 
 			return nil
 		},
