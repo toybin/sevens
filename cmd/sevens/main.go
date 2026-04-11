@@ -2183,13 +2183,17 @@ func revertCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			db, err := openDB()
+			stack, err := openKB()
 			if err != nil {
 				return err
 			}
-			defer db.Close()
+			defer stack.Close()
 
 			// Find the last "applied" log entry with a commit hash
+			// Note: kb.LogEntry doesn't carry Commit/FilesCreated/FilesEdited
+			// yet -- those are richer fields from apply.LogEntry. For now,
+			// fall back to legacy log for revert since it needs those fields.
+			db := stack.Store.DB()
 			entries, err := apply.ReadLogDB(db, resolved, nodeTitle)
 			if err != nil {
 				return fmt.Errorf("reading log: %w", err)
@@ -2221,19 +2225,16 @@ func revertCmd() *cobra.Command {
 				return nil
 			}
 
-			// Revert: checkout the commit before the applied one
-			if !apply.IsGitRepo(resolved) {
+			if !projmd.IsGitRepo(resolved) {
 				return fmt.Errorf("root is not a git repository")
 			}
 
-			// Get the parent commit
 			parentHashOut, err := exec.Command("git", "-C", resolved, "rev-parse", lastApplied.Commit+"~1").CombinedOutput()
 			if err != nil {
 				return fmt.Errorf("finding parent commit: %s", strings.TrimSpace(string(parentHashOut)))
 			}
 			parentHash := strings.TrimSpace(string(parentHashOut))
 
-			// Checkout files from parent commit
 			allFiles := append(lastApplied.FilesCreated, lastApplied.FilesEdited...)
 			for _, f := range allFiles {
 				out, err := exec.Command("git", "-C", resolved, "checkout", parentHash, "--", f).CombinedOutput()
@@ -2242,7 +2243,6 @@ func revertCmd() *cobra.Command {
 				}
 			}
 
-			// Remove created files (they didn't exist before)
 			for _, f := range lastApplied.FilesCreated {
 				path := filepath.Join(resolved, f)
 				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -2252,29 +2252,23 @@ func revertCmd() *cobra.Command {
 				}
 			}
 
-			// Commit the revert
-			hash, err := apply.CommitFiles(resolved, fmt.Sprintf("sevens: revert %s on %q", lastApplied.Function, nodeTitle), allFiles)
+			hash, err := projmd.CommitFiles(resolved, fmt.Sprintf("sevens: revert %s on %q", lastApplied.Function, nodeTitle), allFiles)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s git commit failed: %v\n", ui.Warning.Render("[revert]"), err)
 			} else {
 				fmt.Fprintf(os.Stderr, "%s Committed revert: %s\n", ui.Warning.Render("[revert]"), hash)
 			}
 
-			// Log the revert
-			revertEntry := apply.LogEntry{
+			// Log the revert via new KB
+			stack.KB.AppendLog(context.Background(), kb.LogEntry{
 				Event:     "reverted",
 				Root:      resolved,
 				Function:  lastApplied.Function,
-				Target:    nodeTitle,
+				Node:      nodeTitle,
 				Timestamp: time.Now().UTC().Format(time.RFC3339),
-				Commit:    strings.TrimSpace(hash),
-				Note:      fmt.Sprintf("reverted commit %s", lastApplied.Commit),
-			}
-			if err := apply.AppendLogDB(db, revertEntry); err != nil {
-				fmt.Fprintf(os.Stderr, "%s failed to log revert: %v\n", ui.Warning.Render("[revert]"), err)
-			}
+				Result:    fmt.Sprintf("reverted commit %s", lastApplied.Commit),
+			})
 
-			// Re-sync
 			return syncRoot(resolved)
 		},
 	}
