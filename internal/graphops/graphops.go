@@ -61,7 +61,12 @@ func (g *Graph) Spec(predicate string) *PredicateSpec {
 
 // Set writes a value for a functional predicate: retracts any existing
 // value for (subject, predicate), then asserts the new one.
+// If the predicate is registered as relational, returns an error --
+// use Assert for relational predicates.
 func (g *Graph) Set(ctx context.Context, subject, predicate, object string) error {
+	if spec, ok := g.specs[predicate]; ok && spec.Multiplicity == Relational {
+		return fmt.Errorf("graphops: Set called on relational predicate %q; use Assert", predicate)
+	}
 	// Retract existing values for this (subject, predicate)
 	existing, err := g.store.BySubjectPredicate(ctx, subject, predicate)
 	if err != nil {
@@ -185,6 +190,24 @@ func (g *Graph) RetractSubgraph(ctx context.Context, membershipPredicate, root s
 		}
 	}
 	return nil
+}
+
+// Subgraph returns all triples for subjects that belong to a root,
+// identified by a membership predicate. Read-only view of a subtree.
+func (g *Graph) Subgraph(ctx context.Context, membershipPredicate, root string) ([]triple.Triple, error) {
+	members, err := g.store.ByPredicateObject(ctx, membershipPredicate, root)
+	if err != nil {
+		return nil, err
+	}
+	var result []triple.Triple
+	for _, subj := range members {
+		triples, err := g.store.BySubject(ctx, subj)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, triples...)
+	}
+	return result, nil
 }
 
 func deduplicate(ss []string) []string {

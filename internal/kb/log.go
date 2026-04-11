@@ -12,16 +12,20 @@ import (
 
 // LogEntry records a function application or pipeline transition.
 type LogEntry struct {
-	Subject   string
-	Event     string
-	Root      string
-	Function  string
-	Node      string
-	Step      string
-	StepIndex string
-	Timestamp string
-	Session   string
-	Result    string
+	Subject      string
+	Event        string
+	Root         string
+	Function     string
+	Node         string
+	Step         string
+	StepIndex    string
+	Timestamp    string
+	Session      string
+	Result       string
+	Commit       string
+	Note         string
+	FilesCreated []string
+	FilesEdited  []string
 }
 
 // AppendLog writes a log entry as triples. Generates a unique subject
@@ -56,6 +60,18 @@ func (k *KB) AppendLog(ctx context.Context, entry LogEntry) error {
 	if entry.Result != "" {
 		triples = append(triples, triple.Triple{entry.Subject, PredLogResult, entry.Result})
 	}
+	if entry.Commit != "" {
+		triples = append(triples, triple.Triple{entry.Subject, PredLogCommit, entry.Commit})
+	}
+	if entry.Note != "" {
+		triples = append(triples, triple.Triple{entry.Subject, PredLogNote, entry.Note})
+	}
+	for _, f := range entry.FilesCreated {
+		triples = append(triples, triple.Triple{entry.Subject, PredLogFilesCreated, f})
+	}
+	for _, f := range entry.FilesEdited {
+		triples = append(triples, triple.Triple{entry.Subject, PredLogFilesEdited, f})
+	}
 
 	return k.graph.Store().AssertBatch(ctx, triples)
 }
@@ -88,6 +104,10 @@ func (k *KB) ReadLog(ctx context.Context, root, nodeTitle string) ([]LogEntry, e
 		entry.Timestamp, _, _ = k.graph.Lookup(ctx, subj, PredLogTimestamp)
 		entry.Session, _, _ = k.graph.Lookup(ctx, subj, PredLogSession)
 		entry.Result, _, _ = k.graph.Lookup(ctx, subj, PredLogResult)
+		entry.Commit, _, _ = k.graph.Lookup(ctx, subj, PredLogCommit)
+		entry.Note, _, _ = k.graph.Lookup(ctx, subj, PredLogNote)
+		entry.FilesCreated, _ = k.graph.Store().BySubjectPredicate(ctx, subj, PredLogFilesCreated)
+		entry.FilesEdited, _ = k.graph.Store().BySubjectPredicate(ctx, subj, PredLogFilesEdited)
 		entries = append(entries, entry)
 	}
 

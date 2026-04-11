@@ -46,15 +46,19 @@ const (
 
 // Log predicates
 const (
-	PredLogEvent     = "log/event"
-	PredLogRoot      = "log/root"
-	PredLogFunction  = "log/function"
-	PredLogNode      = "log/node"
-	PredLogStep      = "log/step"
-	PredLogStepIndex = "log/step-index"
-	PredLogTimestamp  = "log/timestamp"
-	PredLogSession   = "log/session"
-	PredLogResult    = "log/result"
+	PredLogEvent        = "log/event"
+	PredLogRoot         = "log/root"
+	PredLogFunction     = "log/function"
+	PredLogNode         = "log/node"
+	PredLogStep         = "log/step"
+	PredLogStepIndex    = "log/step-index"
+	PredLogTimestamp     = "log/timestamp"
+	PredLogSession      = "log/session"
+	PredLogResult       = "log/result"
+	PredLogCommit       = "log/commit"
+	PredLogNote         = "log/note"
+	PredLogFilesCreated = "log/files-created"
+	PredLogFilesEdited  = "log/files-edited"
 )
 
 // allSpecs returns the predicate specifications to register with
@@ -96,5 +100,9 @@ func allSpecs() []graphops.PredicateSpec {
 		{Name: PredLogTimestamp, Multiplicity: graphops.Functional},
 		{Name: PredLogSession, Multiplicity: graphops.Functional},
 		{Name: PredLogResult, Multiplicity: graphops.Functional},
+		{Name: PredLogCommit, Multiplicity: graphops.Functional},
+		{Name: PredLogNote, Multiplicity: graphops.Functional},
+		{Name: PredLogFilesCreated, Multiplicity: graphops.Relational},
+		{Name: PredLogFilesEdited, Multiplicity: graphops.Relational},
 	}
 }

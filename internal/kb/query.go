@@ -189,14 +189,19 @@ func (k *KB) Validate(ctx context.Context, root string, maxChildren, maxContentL
 	}
 
 	var violations []Violation
+	hasParent := make(map[string]bool)
+	isChild := make(map[string]bool)
+
 	for _, subj := range subjects {
 		title, _, _ := k.graph.Lookup(ctx, subj, PredNodeTitle)
 		if title == "" {
 			continue
 		}
 
-		// Orphan check: has parent predicate, but parent subject doesn't exist
+		// Missing parent check: has parent predicate, but parent doesn't exist
 		if parentSubj, ok, _ := k.graph.Lookup(ctx, subj, PredNodeParent); ok {
+			hasParent[subj] = true
+			isChild[subj] = true
 			if _, exists, _ := k.graph.Lookup(ctx, parentSubj, PredNodeTitle); !exists {
 				violations = append(violations, Violation{
 					Kind: "missing-parent", Title: title,
@@ -229,7 +234,46 @@ func (k *KB) Validate(ctx context.Context, root string, maxChildren, maxContentL
 				}
 			}
 		}
+
+		// Cycle check: is this node its own ancestor?
+		ancestors, _ := k.graph.Reachable(ctx, subj, PredNodeParent, false)
+		for _, a := range ancestors {
+			if a == subj && len(ancestors) > 1 {
+				violations = append(violations, Violation{
+					Kind: "cycle", Title: title,
+					Detail: "node is its own ancestor via node/parent",
+				})
+				break
+			}
+		}
 	}
+
+	// Orphan check: nodes with no parent that aren't root nodes.
+	// A root node is one with no parent and at least one child,
+	// or simply the node with no parent. We flag nodes that have
+	// no parent AND aren't the only parentless node (i.e., there
+	// should be exactly one root per tree).
+	var parentless []string
+	for _, subj := range subjects {
+		if !hasParent[subj] {
+			title, _, _ := k.graph.Lookup(ctx, subj, PredNodeTitle)
+			if title != "" {
+				parentless = append(parentless, title)
+			}
+		}
+	}
+	if len(parentless) > 1 {
+		// Multiple parentless nodes -- all but the first are orphans
+		// (heuristic: the one with children is the real root)
+		for _, title := range parentless[1:] {
+			violations = append(violations, Violation{
+				Kind:   "orphan",
+				Title:  title,
+				Detail: "node has no parent (multiple root nodes detected)",
+			})
+		}
+	}
+
 	return violations, nil
 }
 

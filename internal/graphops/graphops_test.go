@@ -334,6 +334,54 @@ func TestRegisterAndRetrieveSpec(t *testing.T) {
 	}
 }
 
+func TestSetRejectsRelational(t *testing.T) {
+	g := testGraph(t)
+	g.RegisterPredicate(graphops.PredicateSpec{
+		Name:         "link",
+		Multiplicity: graphops.Relational,
+	})
+
+	err := g.Set(ctx(), "A", "link", "B")
+	if err == nil {
+		t.Fatal("expected error calling Set on relational predicate")
+	}
+}
+
+func TestSetAllowsUnregistered(t *testing.T) {
+	g := testGraph(t)
+	// Unregistered predicates are allowed (no metadata = no restriction)
+	err := g.Set(ctx(), "A", "unknown-pred", "val")
+	if err != nil {
+		t.Fatalf("expected no error for unregistered predicate, got %v", err)
+	}
+}
+
+func TestSubgraph(t *testing.T) {
+	g := testGraph(t)
+	s := g.Store()
+
+	s.Assert(ctx(), triple.Triple{"n1", "root", "R1"})
+	s.Assert(ctx(), triple.Triple{"n1", "content", "hello"})
+	s.Assert(ctx(), triple.Triple{"n2", "root", "R1"})
+	s.Assert(ctx(), triple.Triple{"n2", "content", "world"})
+	s.Assert(ctx(), triple.Triple{"n3", "root", "R2"})
+
+	triples, err := g.Subgraph(ctx(), "root", "R1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// n1 has 2 triples, n2 has 2 triples = 4 total
+	if len(triples) != 4 {
+		t.Fatalf("expected 4 triples in subgraph, got %d", len(triples))
+	}
+	// n3 should not appear
+	for _, tr := range triples {
+		if tr.Subject == "n3" {
+			t.Fatal("n3 should not be in R1's subgraph")
+		}
+	}
+}
+
 func TestSpecUnregistered(t *testing.T) {
 	g := testGraph(t)
 	if spec := g.Spec("unknown"); spec != nil {

@@ -313,11 +313,51 @@ func TestDeleteNode(t *testing.T) {
 	k := testKB(t)
 	k.CreateNode(ctx(), testRoot, "Doomed", "goodbye", nil)
 
-	k.DeleteNode(ctx(), testRoot, "Doomed")
+	err := k.DeleteNode(ctx(), testRoot, "Doomed")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	subj := k.Resolve(ctx(), testRoot, "Doomed")
 	if subj != "" {
 		t.Fatal("expected node to be gone after delete")
+	}
+}
+
+func TestDeleteNodeRefusesWithChildren(t *testing.T) {
+	k := testKB(t)
+	k.CreateNode(ctx(), testRoot, "Parent", "", nil)
+	p := "Parent"
+	k.CreateNode(ctx(), testRoot, "Child", "", &p)
+
+	err := k.DeleteNode(ctx(), testRoot, "Parent")
+	if err == nil {
+		t.Fatal("expected error deleting node with children")
+	}
+}
+
+func TestCreateNodeDuplicateErrors(t *testing.T) {
+	k := testKB(t)
+	k.CreateNode(ctx(), testRoot, "Unique", "first", nil)
+
+	_, err := k.CreateNode(ctx(), testRoot, "Unique", "second", nil)
+	if err == nil {
+		t.Fatal("expected error creating duplicate node")
+	}
+}
+
+func TestMoveNodeCycleErrors(t *testing.T) {
+	k := testKB(t)
+	k.CreateNode(ctx(), testRoot, "A", "", nil)
+	p := "A"
+	k.CreateNode(ctx(), testRoot, "B", "", &p)
+	p2 := "B"
+	k.CreateNode(ctx(), testRoot, "C", "", &p2)
+
+	// Try to move A under C (A -> B -> C -> A would be a cycle)
+	err := k.MoveNode(ctx(), testRoot, "A", "C")
+	if err == nil {
+		t.Fatal("expected error for cycle-creating move")
 	}
 }
 
@@ -381,6 +421,26 @@ func TestValidateOverflow(t *testing.T) {
 	}
 }
 
+func TestValidateOrphans(t *testing.T) {
+	k := testKB(t)
+	k.CreateNode(ctx(), testRoot, "Root", "", nil)
+	k.CreateNode(ctx(), testRoot, "Orphan", "lost", nil)
+
+	violations, err := k.Validate(ctx(), testRoot, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, v := range violations {
+		if v.Kind == "orphan" && v.Title == "Orphan" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected orphan violation for 'Orphan'")
+	}
+}
+
 func TestValidateOverlength(t *testing.T) {
 	k := testKB(t)
 	k.CreateNode(ctx(), testRoot, "Verbose", "x]x]x]x]x]x]x]x]x]x]", nil) // 22 chars
@@ -432,6 +492,43 @@ func TestAppendAndReadLog(t *testing.T) {
 	}
 	if entries[1].Function != "decompose" {
 		t.Fatalf("expected second entry to be decompose, got %q", entries[1].Function)
+	}
+}
+
+func TestLogWithRichFields(t *testing.T) {
+	k := testKB(t)
+
+	k.AppendLog(ctx(), kb.LogEntry{
+		Event:        "applied",
+		Root:         testRoot,
+		Function:     "decompose",
+		Node:         "Note",
+		Timestamp:    "2026-04-10T14:00:00Z",
+		Commit:       "abc123",
+		Note:         "created 4 children",
+		FilesCreated: []string{"child1.md", "child2.md"},
+		FilesEdited:  []string{"note.md"},
+	})
+
+	entries, err := k.ReadLog(ctx(), testRoot, "Note")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	e := entries[0]
+	if e.Commit != "abc123" {
+		t.Fatalf("expected commit 'abc123', got %q", e.Commit)
+	}
+	if e.Note != "created 4 children" {
+		t.Fatalf("expected note, got %q", e.Note)
+	}
+	if len(e.FilesCreated) != 2 {
+		t.Fatalf("expected 2 files created, got %d", len(e.FilesCreated))
+	}
+	if len(e.FilesEdited) != 1 {
+		t.Fatalf("expected 1 file edited, got %d", len(e.FilesEdited))
 	}
 }
 

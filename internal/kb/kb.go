@@ -28,9 +28,14 @@ func (k *KB) Graph() *graphops.Graph { return k.graph }
 // --- Node operations ---
 
 // CreateNode creates a node with the given title, content, and optional parent.
-// Returns the computed subject.
+// Returns the computed subject. Errors if a node with the same (root, title) exists.
 func (k *KB) CreateNode(ctx context.Context, root, title, content string, parent *string) (string, error) {
 	subject := NodeSubject(root, title)
+
+	// Check for duplicate
+	if _, ok, _ := k.graph.Lookup(ctx, subject, PredNodeTitle); ok {
+		return "", fmt.Errorf("kb: node %q already exists in root", title)
+	}
 
 	if err := k.graph.Set(ctx, subject, PredNodeTitle, title); err != nil {
 		return "", fmt.Errorf("kb: create node: %w", err)
@@ -53,9 +58,20 @@ func (k *KB) CreateNode(ctx context.Context, root, title, content string, parent
 	return subject, nil
 }
 
-// DeleteNode removes all triples for a node.
+// DeleteNode removes all triples for a node. Returns an error if the
+// node has children -- caller must move or delete them first.
 func (k *KB) DeleteNode(ctx context.Context, root, title string) error {
 	subject := NodeSubject(root, title)
+
+	children, err := k.graph.Compose(ctx, subject,
+		graphops.ParsePath([]string{PredNodeParent + "~"}))
+	if err != nil {
+		return err
+	}
+	if len(children) > 0 {
+		return fmt.Errorf("kb: cannot delete %q: has %d children", title, len(children))
+	}
+
 	return k.graph.Store().RetractBySubject(ctx, subject)
 }
 
@@ -68,10 +84,23 @@ func (k *KB) SetContent(ctx context.Context, root, title, content string) error 
 	return k.graph.Set(ctx, subject, PredNodeCharCount, strconv.Itoa(len(content)))
 }
 
-// MoveNode changes a node's parent.
+// MoveNode changes a node's parent. Returns an error if the new parent
+// is a descendant of the node (would create a cycle).
 func (k *KB) MoveNode(ctx context.Context, root, title, newParentTitle string) error {
 	subject := NodeSubject(root, title)
 	parentSubject := NodeSubject(root, newParentTitle)
+
+	// Cycle check: is newParent reachable from subject via parent~?
+	descendants, err := k.graph.Reachable(ctx, subject, PredNodeParent, true)
+	if err != nil {
+		return err
+	}
+	for _, d := range descendants {
+		if d == parentSubject {
+			return fmt.Errorf("kb: cannot move %q under %q: would create cycle", title, newParentTitle)
+		}
+	}
+
 	return k.graph.Set(ctx, subject, PredNodeParent, parentSubject)
 }
 
