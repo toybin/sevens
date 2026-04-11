@@ -1,6 +1,7 @@
 package function
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,17 +40,42 @@ type ednRequire struct {
 	As       string `edn:"as,omitempty"`
 }
 
+// ednDeterministicConfig is the EDN representation of deterministic backend config.
+type ednDeterministicConfig struct {
+	Mode            string `edn:"mode"`
+	TitlePattern    string `edn:"title-pattern,omitempty"`
+	Parent          string `edn:"parent,omitempty"`
+	ParentTemplate  string `edn:"parent-template,omitempty"`
+	Target          string `edn:"target,omitempty"`
+	Heading         string `edn:"heading,omitempty"`
+	CreateIfMissing bool   `edn:"create-if-missing,omitempty"`
+}
+
+// ednBackendSpec is the EDN representation of a step's backend configuration.
+type ednBackendSpec struct {
+	Kind   string                  `edn:"kind"`
+	Config *ednDeterministicConfig `edn:"config,omitempty"`
+}
+
+// ednParam is the EDN representation of a function parameter.
+type ednParam struct {
+	Name     string `edn:"name"`
+	Required bool   `edn:"required,omitempty"`
+	Default  string `edn:"default,omitempty"`
+}
+
 // ednStep is the EDN representation of a pipeline step.
 type ednStep struct {
-	Name     string          `edn:"name"`
-	Prompt   string          `edn:"prompt"`
-	Input    string          `edn:"input"`
-	Output   string          `edn:"output"`
-	Gate     string          `edn:"gate"`
-	Requires []ednRequire    `edn:"requires,omitempty"`
-	Fn       string          `edn:"fn,omitempty"`
-	MapOver  string          `edn:"map-over,omitempty"`
-	Agent    *ednAgentConfig `edn:"agent,omitempty"`
+	Name        string          `edn:"name"`
+	Prompt      string          `edn:"prompt"`
+	Input       string          `edn:"input"`
+	Output      string          `edn:"output"`
+	Gate        string          `edn:"gate"`
+	Requires    []ednRequire    `edn:"requires,omitempty"`
+	Fn          string          `edn:"fn,omitempty"`
+	MapOver     string          `edn:"map-over,omitempty"`
+	Agent       *ednAgentConfig `edn:"agent,omitempty"`
+	BackendSpec *ednBackendSpec `edn:"backend,omitempty"`
 }
 
 // ednFunction is the EDN representation of a function definition.
@@ -67,6 +93,7 @@ type ednFunction struct {
 	ContextFiles []string        `edn:"context-files"`
 	CrossWalk    string          `edn:"cross-walk,omitempty"`
 	AdHoc        bool            `edn:"ad-hoc,omitempty"`
+	Params       []ednParam      `edn:"params,omitempty"`
 }
 
 // LoadFunction loads a function definition by name from EDN and converts
@@ -202,6 +229,14 @@ func convertEDNFunction(raw *ednFunction) *Function {
 		fn.ContextPolicy = raw.Agent.ContextPolicy
 	}
 
+	for _, p := range raw.Params {
+		fn.Params = append(fn.Params, Param{
+			Name:     p.Name,
+			Required: p.Required,
+			Default:  p.Default,
+		})
+	}
+
 	steps := effectiveEDNSteps(raw)
 	for _, s := range steps {
 		step := convertEDNStep(s, raw)
@@ -277,14 +312,35 @@ func convertEDNStep(s ednStep, fn *ednFunction) Step {
 		}
 	}
 
-	step.Backend = BackendSpec{
-		Kind:           BackendLLM,
-		PromptTemplate: s.Prompt,
-	}
-	agent := effectiveEDNAgent(fn, &s)
-	if agent != nil {
-		step.Backend.Persona = agent.Persona
-		step.Backend.SystemPrompt = agent.SystemPrompt
+	if s.BackendSpec != nil && s.BackendSpec.Kind == "deterministic" {
+		cfg := DeterministicConfig{}
+		if s.BackendSpec.Config != nil {
+			cfg = DeterministicConfig{
+				Mode:            s.BackendSpec.Config.Mode,
+				TitlePattern:    s.BackendSpec.Config.TitlePattern,
+				Parent:          s.BackendSpec.Config.Parent,
+				ParentTemplate:  s.BackendSpec.Config.ParentTemplate,
+				Target:          s.BackendSpec.Config.Target,
+				Heading:         s.BackendSpec.Config.Heading,
+				CreateIfMissing: s.BackendSpec.Config.CreateIfMissing,
+			}
+		}
+		cfgJSON, _ := json.Marshal(cfg)
+		step.Backend = BackendSpec{
+			Kind:           BackendDeterministic,
+			PromptTemplate: s.Prompt,
+			Handler:        string(cfgJSON),
+		}
+	} else {
+		step.Backend = BackendSpec{
+			Kind:           BackendLLM,
+			PromptTemplate: s.Prompt,
+		}
+		agent := effectiveEDNAgent(fn, &s)
+		if agent != nil {
+			step.Backend.Persona = agent.Persona
+			step.Backend.SystemPrompt = agent.SystemPrompt
+		}
 	}
 
 	return step

@@ -1,0 +1,10 @@
+{:name "daily-note"
+ :description "Create or scaffold today's daily note under inbox"
+ :steps [{:name "create"
+          :output "ops"
+          :backend {:kind "deterministic"
+                    :config {:mode "create-node"
+                             :title-pattern "{{date}}"
+                             :parent "inbox"
+                             :parent-template "inbox-root"}}}]
+ :params [{:name "summary"}]}

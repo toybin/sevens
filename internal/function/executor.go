@@ -338,16 +338,31 @@ func (e *Executor) executeStep(ctx context.Context, root string, fn *Function, p
 		return nil, fmt.Errorf("resolving context for step %q: %w", step.Name, err)
 	}
 
-	// Render prompt
-	promptText := RenderPrompt(step.Backend.PromptTemplate, rc)
+	// Select backend based on step configuration
+	var be TransformBackend
+	var prompt RenderedPrompt
 
-	prompt := RenderedPrompt{
-		System: step.Backend.SystemPrompt,
-		User:   promptText,
+	switch step.Backend.Kind {
+	case BackendDeterministic:
+		be = &DeterministicBackend{}
+		// For deterministic: System = JSON config, User = rendered content
+		promptText := RenderPrompt(step.Backend.PromptTemplate, rc)
+		prompt = RenderedPrompt{
+			System: step.Backend.Handler,
+			User:   promptText,
+		}
+	default:
+		be = e.Backend
+		promptText := RenderPrompt(step.Backend.PromptTemplate, rc)
+		prompt = RenderedPrompt{
+			System: step.Backend.SystemPrompt,
+			User:   promptText,
+			Model:  step.Backend.Persona,
+		}
 	}
 
 	// Call backend
-	result, err := e.Backend.Execute(ctx, prompt)
+	result, err := be.Execute(ctx, prompt)
 	if err != nil {
 		return nil, fmt.Errorf("backend execution for step %q: %w", step.Name, err)
 	}

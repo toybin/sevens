@@ -135,11 +135,30 @@ type Step struct {
 	MapOver    string // predicate path to map over
 }
 
+// Param declares a named parameter for a function.
+type Param struct {
+	Name     string
+	Required bool
+	Default  string
+}
+
+// DeterministicConfig holds the configuration for a deterministic backend step.
+type DeterministicConfig struct {
+	Mode            string `json:"mode"`                        // "create-node", "append-node", "insert-block"
+	TitlePattern    string `json:"title_pattern,omitempty"`     // for create-node
+	Parent          string `json:"parent,omitempty"`            // for create-node
+	ParentTemplate  string `json:"parent_template,omitempty"`   // bootstrap parent if missing
+	Target          string `json:"target,omitempty"`            // for append-node/insert-block ("." = focused node)
+	Heading         string `json:"heading,omitempty"`           // for insert-block
+	CreateIfMissing bool   `json:"create_if_missing,omitempty"` // for insert-block
+}
+
 // Function is a named, reusable transformation.
 type Function struct {
 	Name          string
 	Description   string
 	Steps         []Step
+	Params        []Param
 	ContextPolicy string // "minimal", "neighborhood", "full"
 }
 

@@ -1,0 +1,8 @@
+{:name "append-note"
+ :description "Append a timestamped note to a target node"
+ :steps [{:name "append"
+          :output "ops"
+          :backend {:kind "deterministic"
+                    :config {:mode "append-node"
+                             :target "."}}}]
+ :params [{:name "text" :required true}]}

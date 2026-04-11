@@ -15,7 +15,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"olympos.io/encoding/edn"
-	"sevens/internal/apply"
 	"sevens/internal/backend"
 	"sevens/internal/config"
 	"sevens/internal/function"
@@ -1889,66 +1888,194 @@ func submitCmd() *cobra.Command {
 	return cmd
 }
 
-func instantiateTemplateNode(db *sql.DB, root string, tmpl *apply.NodeTemplate, cliParent string, cliTarget string, vars map[string]string) (*apply.TemplateExecutionResult, error) {
-	result, err := apply.ExecuteTemplate(db, root, tmpl, apply.TemplateExecutionOptions{
-		Parent:     cliParent,
-		TargetNode: cliTarget,
-		Vars:       vars,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	files := append([]string(nil), result.Created...)
-	files = append(files, result.Edited...)
-	if projmd.IsGitRepo(root) && len(files) > 0 {
-		if _, err := projmd.CommitFiles(root, result.CommitMessage, files); err != nil {
-			fmt.Fprintf(os.Stderr, "%s git commit failed: %v\n", ui.Warning.Render("[warn]"), err)
-		}
-	}
-	return result, nil
-}
-
-func previewTemplateNode(db *sql.DB, root string, tmpl *apply.NodeTemplate, cliParent string, cliTarget string, vars map[string]string) error {
-	preview, err := apply.PreviewTemplate(db, root, tmpl, apply.TemplateExecutionOptions{
-		Parent:     cliParent,
-		TargetNode: cliTarget,
-		Vars:       vars,
-	})
+// executeDeterministicFunction loads a deterministic function by name, resolves
+// variables, renders the content template, and applies the resulting FileOps
+// via projection. This replaces the old apply.ExecuteTemplate path.
+func executeDeterministicFunction(stack *kbStack, root string, fnName string, cliParent string, cliTarget string, vars map[string]string) error {
+	fn, _, err := function.LoadFunction(fnName)
 	if err != nil {
 		return err
 	}
 
+	// Merge builtin vars (date, time, timestamp) with user vars
+	allVars := function.BuiltinVars()
+	for k, v := range vars {
+		allVars[k] = v
+	}
+
+	// Check required params
+	missing := function.MissingParams(fn, allVars)
+	if len(missing) > 0 {
+		return fmt.Errorf("function %q requires variables: %s\nUse --set key=value to provide them", fnName, strings.Join(missing, ", "))
+	}
+
+	proj := openProjection(stack)
+
+	// Walk through steps (deterministic functions are typically single-step)
+	for _, step := range fn.Steps {
+		if step.Backend.Kind != function.BackendDeterministic {
+			continue
+		}
+
+		var cfg function.DeterministicConfig
+		if err := json.Unmarshal([]byte(step.Backend.Handler), &cfg); err != nil {
+			return fmt.Errorf("parse deterministic config: %w", err)
+		}
+
+		// Resolve template variables in the config
+		cfg.TitlePattern = function.ResolveTemplateVars(cfg.TitlePattern, allVars)
+		cfg.Parent = function.ResolveTemplateVars(cfg.Parent, allVars)
+		cfg.Heading = function.ResolveTemplateVars(cfg.Heading, allVars)
+		cfg.Target = function.ResolveTemplateVars(cfg.Target, allVars)
+
+		// Render content template with variables
+		content := function.ResolveTemplateVars(step.Backend.PromptTemplate, allVars)
+		content = function.CleanUnresolved(content)
+
+		// Apply CLI overrides
+		if cliParent != "" {
+			cfg.Parent = cliParent
+		}
+		if cliTarget != "" {
+			cfg.Target = cliTarget
+		}
+
+		switch cfg.Mode {
+		case "create-node":
+			// Bootstrap parent if needed
+			if cfg.Parent != "" && cfg.ParentTemplate != "" {
+				if err := ensureParentNode(stack, root, cfg.Parent, cfg.ParentTemplate, allVars); err != nil {
+					return err
+				}
+			}
+
+			ops := []projection.FileOp{{
+				Action:  "create",
+				Title:   cfg.TitlePattern,
+				Parent:  cfg.Parent,
+				Content: content,
+			}}
+			result, err := proj.ApplyOps(context.Background(), root, ops)
+			if err != nil {
+				return fmt.Errorf("creating node: %w", err)
+			}
+			for _, f := range result.FilesCreated {
+				fmt.Fprintf(os.Stderr, "%s Created: %s\n", ui.Success.Render("[new]"), f)
+			}
+			commitAndReport(root, fmt.Sprintf("sevens: %s %s", fnName, cfg.TitlePattern), result.FilesCreated, result.FilesEdited)
+
+		case "append-node":
+			target := cfg.Target
+			edit, err := projmd.PrepareAppend(context.Background(), stack.KB, root, target, content)
+			if err != nil {
+				return fmt.Errorf("preparing append: %w", err)
+			}
+			if err := os.WriteFile(edit.FilePath, []byte(edit.NewText), 0644); err != nil {
+				return fmt.Errorf("writing append: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "%s Edited: %s\n", ui.Success.Render("[edit]"), edit.FilePath)
+			commitAndReport(root, fmt.Sprintf("sevens: %s on %s", fnName, target), nil, []string{edit.FilePath})
+
+		case "insert-block":
+			target := cfg.Target
+			edit, err := projmd.PrepareInsertUnderHeading(context.Background(), stack.KB, root, target, cfg.Heading, cfg.CreateIfMissing, content)
+			if err != nil {
+				return fmt.Errorf("preparing insert: %w", err)
+			}
+			if err := os.WriteFile(edit.FilePath, []byte(edit.NewText), 0644); err != nil {
+				return fmt.Errorf("writing insert: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "%s Edited: %s\n", ui.Success.Render("[edit]"), edit.FilePath)
+			commitAndReport(root, fmt.Sprintf("sevens: %s under %s", fnName, cfg.Heading), nil, []string{edit.FilePath})
+
+		default:
+			return fmt.Errorf("unknown deterministic mode %q", cfg.Mode)
+		}
+	}
+
+	return nil
+}
+
+// ensureParentNode bootstraps a parent node if it doesn't exist,
+// by executing its parent-template function.
+func ensureParentNode(stack *kbStack, root string, parentTitle string, parentTemplate string, vars map[string]string) error {
+	// Check if parent already exists
+	if subj := stack.KB.Resolve(context.Background(), root, parentTitle); subj != "" {
+		return nil // parent exists
+	}
+	// Recursively execute the parent template function
+	return executeDeterministicFunction(stack, root, parentTemplate, "", "", vars)
+}
+
+// previewDeterministicFunction shows what a deterministic function would do.
+func previewDeterministicFunction(fnName string, vars map[string]string) error {
+	fn, _, err := function.LoadFunction(fnName)
+	if err != nil {
+		return err
+	}
+
+	allVars := function.BuiltinVars()
+	for k, v := range vars {
+		allVars[k] = v
+	}
+
+	missing := function.MissingParams(fn, allVars)
+
 	fmt.Println(ui.Label.Render("Template Preview"))
-	fmt.Printf("%s %s\n", ui.Dim.Render("template:"), tmpl.Name)
-	fmt.Printf("%s %s\n", ui.Dim.Render("mode:"), preview.Mode)
-	if preview.Draft {
-		fmt.Printf("%s %s\n", ui.Dim.Render("draft:"), "yes")
+	fmt.Printf("%s %s\n", ui.Dim.Render("function:"), fnName)
+	if len(missing) > 0 {
+		fmt.Printf("%s %s\n", ui.Dim.Render("missing:"), strings.Join(missing, ", "))
 	}
-	if len(preview.Missing) > 0 {
-		fmt.Printf("%s %s\n", ui.Dim.Render("missing:"), strings.Join(preview.Missing, ", "))
-	}
-	switch preview.Mode {
-	case "append-node", "insert-block":
-		fmt.Printf("%s %s\n", ui.Dim.Render("target:"), preview.TargetNode)
-		if preview.Heading != "" {
-			fmt.Printf("%s %s\n", ui.Dim.Render("heading:"), preview.Heading)
-			if preview.CreateIfMissing {
-				fmt.Printf("%s %s\n", ui.Dim.Render("create-heading:"), "yes")
+
+	for _, step := range fn.Steps {
+		if step.Backend.Kind != function.BackendDeterministic {
+			continue
+		}
+		var cfg function.DeterministicConfig
+		if err := json.Unmarshal([]byte(step.Backend.Handler), &cfg); err != nil {
+			continue
+		}
+		cfg.TitlePattern = function.ResolveTemplateVars(cfg.TitlePattern, allVars)
+		cfg.Parent = function.ResolveTemplateVars(cfg.Parent, allVars)
+		cfg.Heading = function.ResolveTemplateVars(cfg.Heading, allVars)
+
+		fmt.Printf("%s %s\n", ui.Dim.Render("mode:"), cfg.Mode)
+		switch cfg.Mode {
+		case "create-node":
+			fmt.Printf("%s %s\n", ui.Dim.Render("title:"), cfg.TitlePattern)
+			if cfg.Parent != "" {
+				fmt.Printf("%s %s\n", ui.Dim.Render("parent:"), cfg.Parent)
+			}
+			if cfg.ParentTemplate != "" {
+				fmt.Printf("%s %s\n", ui.Dim.Render("bootstrap:"), cfg.ParentTemplate)
+			}
+		case "append-node", "insert-block":
+			fmt.Printf("%s %s\n", ui.Dim.Render("target:"), cfg.Target)
+			if cfg.Heading != "" {
+				fmt.Printf("%s %s\n", ui.Dim.Render("heading:"), cfg.Heading)
 			}
 		}
-	default:
-		fmt.Printf("%s %s\n", ui.Dim.Render("title:"), preview.Title)
-		if preview.Parent != "" {
-			fmt.Printf("%s %s\n", ui.Dim.Render("parent:"), preview.Parent)
-		}
-		if preview.BootstrapParent != "" {
-			fmt.Printf("%s %s\n", ui.Dim.Render("bootstrap:"), preview.BootstrapParent)
+
+		content := function.ResolveTemplateVars(step.Backend.PromptTemplate, allVars)
+		content = function.CleanUnresolved(content)
+		fmt.Println(ui.Separator.Render(strings.Repeat("─", 60)))
+		fmt.Println(ui.RenderMarkdownOrPlain(content))
+	}
+	return nil
+}
+
+// commitAndReport commits files and prints the result.
+func commitAndReport(root string, message string, created []string, edited []string) {
+	files := append([]string(nil), created...)
+	files = append(files, edited...)
+	if projmd.IsGitRepo(root) && len(files) > 0 {
+		hash, err := projmd.CommitFiles(root, message, files)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s git commit failed: %v\n", ui.Warning.Render("[warn]"), err)
+		} else if hash != "" {
+			fmt.Fprintf(os.Stderr, "%s Committed: %s\n", ui.Success.Render("[ok]"), hash)
 		}
 	}
-	fmt.Println(ui.Separator.Render(strings.Repeat("─", 60)))
-	fmt.Println(ui.RenderMarkdownOrPlain(preview.Content))
-	return nil
 }
 
 func addTemplateSemanticVars(varMap map[string]string, values map[string]string) map[string]string {
@@ -1967,23 +2094,18 @@ func addTemplateSemanticVars(varMap map[string]string, values map[string]string)
 func templatesCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "templates",
-		Short: "List available manual templates",
+		Short: "List available templates (deterministic functions)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			templates, err := apply.ListTemplates()
+			fns, err := function.ListDeterministicFunctions()
 			if err != nil {
 				return fmt.Errorf("listing templates: %w", err)
 			}
-			if len(templates) == 0 {
+			if len(fns) == 0 {
 				fmt.Fprintln(os.Stderr, "No templates defined")
 				return nil
 			}
-			for _, name := range templates {
-				tmpl, err := apply.LoadTemplate(name)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "%s %s: %v\n", ui.Warning.Render("[warn]"), name, err)
-					continue
-				}
-				fmt.Fprintf(os.Stdout, "%s  %s\n", ui.Label.Render(name), ui.Dim.Render(tmpl.Description))
+			for _, fn := range fns {
+				fmt.Fprintf(os.Stdout, "%s  %s\n", ui.Label.Render(fn.Name), ui.Dim.Render(fn.Description))
 			}
 			return nil
 		},
@@ -2012,7 +2134,11 @@ func captureCmd() *cobra.Command {
 				return err
 			}
 			defer stack.Close()
-			db := stack.Store.DB()
+
+			fn, _, err := function.LoadFunction("inbox-capture")
+			if err != nil {
+				return err
+			}
 
 			varMap := make(map[string]string)
 			for _, v := range vars {
@@ -2025,11 +2151,8 @@ func captureCmd() *cobra.Command {
 				"title":   titleVar,
 				"summary": summaryVar,
 			})
+			varMap = function.BindArgs(fn, args, varMap)
 
-			tmpl, err := apply.LoadTemplate("inbox-capture")
-			if err != nil {
-				return err
-			}
 			resolvedParent := parent
 			if resolvedParent == "." {
 				resolvedParent, err = resolveNodeTitle(".")
@@ -2037,11 +2160,10 @@ func captureCmd() *cobra.Command {
 					return err
 				}
 			}
-			varMap = apply.BindTemplateArgs(tmpl, args, varMap)
 			if dryRun {
-				return previewTemplateNode(db, resolved, tmpl, resolvedParent, "", varMap)
+				return previewDeterministicFunction("inbox-capture", varMap)
 			}
-			if _, err := instantiateTemplateNode(db, resolved, tmpl, resolvedParent, "", varMap); err != nil {
+			if err := executeDeterministicFunction(stack, resolved, "inbox-capture", resolvedParent, "", varMap); err != nil {
 				return err
 			}
 			return syncRoot(resolved)
@@ -2083,7 +2205,6 @@ func newCmd() *cobra.Command {
 				return err
 			}
 			defer stack.Close()
-			db := stack.Store.DB()
 
 			// Parse template variables from --set flags
 			varMap := make(map[string]string)
@@ -2101,11 +2222,13 @@ func newCmd() *cobra.Command {
 			})
 
 			if templateName != "" {
-				// Template mode
-				tmpl, err := apply.LoadTemplate(templateName)
+				// Template mode — load as deterministic function
+				fn, _, err := function.LoadFunction(templateName)
 				if err != nil {
 					return err
 				}
+				varMap = function.BindArgs(fn, args, varMap)
+
 				resolvedParent := parent
 				if resolvedParent == "." {
 					resolvedParent, err = resolveNodeTitle(".")
@@ -2113,45 +2236,36 @@ func newCmd() *cobra.Command {
 						return err
 					}
 				}
-				varMap = apply.BindTemplateArgs(tmpl, args, varMap)
 				if dryRun {
-					return previewTemplateNode(db, resolved, tmpl, resolvedParent, "", varMap)
+					return previewDeterministicFunction(templateName, varMap)
 				}
-				if _, err := instantiateTemplateNode(db, resolved, tmpl, resolvedParent, "", varMap); err != nil {
+				if err := executeDeterministicFunction(stack, resolved, templateName, resolvedParent, "", varMap); err != nil {
 					return err
 				}
 				return syncRoot(resolved)
 
 			} else {
-				// Simple mode — create a bare node
+				// Simple mode — create a bare node directly
 				if len(args) == 0 {
 					return fmt.Errorf("provide a title or use --template")
 				}
 				title := args[0]
 				content := "# " + title + "\n\n"
-				ops := []apply.FileOp{{
+				proj := openProjection(stack)
+				ops := []projection.FileOp{{
 					Action:  "create",
 					Title:   title,
 					Parent:  parent,
 					Content: content,
 				}}
-				created, _, err := apply.ExecuteOps(ops, resolved, db)
+				result, err := proj.ApplyOps(context.Background(), root, ops)
 				if err != nil {
 					return fmt.Errorf("creating node: %w", err)
 				}
-				for _, f := range created {
+				for _, f := range result.FilesCreated {
 					fmt.Fprintf(os.Stderr, "%s Created: %s\n", ui.Success.Render("[new]"), f)
 				}
-
-				if projmd.IsGitRepo(resolved) && len(created) > 0 {
-					hash, err := projmd.CommitFiles(resolved, fmt.Sprintf("sevens: new node %q", title), created)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "%s git commit failed: %v\n", ui.Success.Render("[new]"), err)
-					} else {
-						fmt.Fprintf(os.Stderr, "%s Committed: %s\n", ui.Success.Render("[new]"), hash)
-					}
-				}
-
+				commitAndReport(resolved, fmt.Sprintf("sevens: new node %q", title), result.FilesCreated, nil)
 				return syncRoot(resolved)
 			}
 		},
@@ -2182,7 +2296,7 @@ func instantiateCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "instantiate <template> [args...]",
-		Short: "Instantiate a manual template",
+		Short: "Instantiate a template (deterministic function)",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resolved, err := resolveRoot(root)
@@ -2195,10 +2309,9 @@ func instantiateCmd() *cobra.Command {
 				return err
 			}
 			defer stack.Close()
-			db := stack.Store.DB()
 
-			templateName := args[0]
-			tmpl, err := apply.LoadTemplate(templateName)
+			fnName := args[0]
+			fn, _, err := function.LoadFunction(fnName)
 			if err != nil {
 				return err
 			}
@@ -2216,7 +2329,7 @@ func instantiateCmd() *cobra.Command {
 				"heading": headingVar,
 				"text":    textVar,
 			})
-			varMap = apply.BindTemplateArgs(tmpl, args[1:], varMap)
+			varMap = function.BindArgs(fn, args[1:], varMap)
 
 			resolvedTarget := targetNode
 			if resolvedTarget == "." {
@@ -2233,9 +2346,9 @@ func instantiateCmd() *cobra.Command {
 				}
 			}
 			if dryRun {
-				return previewTemplateNode(db, resolved, tmpl, resolvedParent, resolvedTarget, varMap)
+				return previewDeterministicFunction(fnName, varMap)
 			}
-			if _, err := instantiateTemplateNode(db, resolved, tmpl, resolvedParent, resolvedTarget, varMap); err != nil {
+			if err := executeDeterministicFunction(stack, resolved, fnName, resolvedParent, resolvedTarget, varMap); err != nil {
 				return err
 			}
 			return syncRoot(resolved)
@@ -2244,7 +2357,7 @@ func instantiateCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&root, "root", "", "Root directory")
 	cmd.Flags().StringVarP(&parent, "parent", "p", "", "Parent node title for create-node templates")
-	cmd.Flags().StringVarP(&targetNode, "at", "a", "", "Target node title for append-node and insert-block templates (use '.' for focused node)")
+	cmd.Flags().StringVarP(&targetNode, "at", "a", "", "Target node title for append-node and insert-block (use '.' for focused node)")
 	cmd.Flags().StringSliceVarP(&vars, "set", "s", nil, "Template variables as key=value")
 	cmd.Flags().StringVar(&titleVar, "title", "", "Template title variable")
 	cmd.Flags().StringVar(&summaryVar, "summary", "", "Template summary variable")

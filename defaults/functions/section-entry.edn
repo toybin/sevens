@@ -1,0 +1,11 @@
+{:name "section-entry"
+ :description "Insert a bullet under a specific heading in a target node"
+ :steps [{:name "insert"
+          :output "ops"
+          :backend {:kind "deterministic"
+                    :config {:mode "insert-block"
+                             :target "."
+                             :heading "{{heading}}"
+                             :create-if-missing true}}}]
+ :params [{:name "heading" :required true}
+          {:name "text" :required true}]}

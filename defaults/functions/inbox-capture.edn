@@ -1,0 +1,11 @@
+{:name "inbox-capture"
+ :description "Create a quick capture note under inbox"
+ :steps [{:name "create"
+          :output "ops"
+          :backend {:kind "deterministic"
+                    :config {:mode "create-node"
+                             :title-pattern "{{title}}"
+                             :parent "inbox"
+                             :parent-template "inbox-root"}}}]
+ :params [{:name "title" :required true}
+          {:name "summary"}]}

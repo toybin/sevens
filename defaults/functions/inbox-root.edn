@@ -1,0 +1,7 @@
+{:name "inbox-root"
+ :description "Ensure the inbox root node exists"
+ :steps [{:name "create"
+          :output "ops"
+          :backend {:kind "deterministic"
+                    :config {:mode "create-node"
+                             :title-pattern "inbox"}}}]}
