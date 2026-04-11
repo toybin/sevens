@@ -742,17 +742,23 @@ func blocksCmd() *cobra.Command {
 
 func inboxCmd() *cobra.Command {
 	var root string
-	var ednOutput bool
 
 	cmd := &cobra.Command{
 		Use:               "inbox [node-title]",
-		Short:             "Show inbox-style child summaries for a container node",
+		Short:             "Show child summaries for a container node",
 		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: completeNodeTitles,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			nodeTitle := "inbox"
+			nodeTitle := ""
 			if len(args) > 0 {
 				nodeTitle = args[0]
+			}
+			if nodeTitle == "" {
+				var err error
+				nodeTitle, err = resolveNodeTitle(".")
+				if err != nil {
+					return fmt.Errorf("no node specified and no focus session active")
+				}
 			}
 
 			resolved, err := resolveRoot(root)
@@ -766,13 +772,9 @@ func inboxCmd() *cobra.Command {
 			}
 			defer stack.Close()
 
-			items, err := stack.KB.InboxOverview(context.Background(), resolved, nodeTitle)
+			items, err := stack.KB.ChildrenSummary(context.Background(), resolved, nodeTitle)
 			if err != nil {
 				return err
-			}
-
-			if ednOutput {
-				return printEDN(items)
 			}
 
 			fmt.Println(ui.NodeTitle.Render(nodeTitle))
@@ -782,27 +784,17 @@ func inboxCmd() *cobra.Command {
 				return nil
 			}
 			for _, item := range items {
-				fmt.Printf("  %s  %s\n", ui.Label.Render(fmt.Sprintf("%-12s", item.Kind)), ui.NodeTitle.Render(item.Title))
-				var parts []string
+				detail := fmt.Sprintf("%d chars", item.CharCount)
 				if item.Empty {
-					parts = append(parts, "empty")
-				} else {
-					parts = append(parts, fmt.Sprintf("%d chars", item.CharCount))
+					detail = "empty"
 				}
-				if item.BulletCount > 0 {
-					parts = append(parts, fmt.Sprintf("%d bullets", item.BulletCount))
-				}
-				if item.HeadingCount > 0 {
-					parts = append(parts, fmt.Sprintf("%d headings", item.HeadingCount))
-				}
-				fmt.Printf("    %s\n", ui.Dim.Render(strings.Join(parts, " · ")))
+				fmt.Printf("  %s  %s\n", ui.NodeTitle.Render(item.Title), ui.Dim.Render("("+detail+")"))
 			}
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&root, "root", "", "Root directory")
-	cmd.Flags().BoolVar(&ednOutput, "edn", false, "Output in EDN format")
 	return cmd
 }
 

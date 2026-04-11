@@ -2,7 +2,6 @@ package kb_test
 
 import (
 	"context"
-	"sort"
 	"testing"
 
 	"sevens/internal/kb"
@@ -116,74 +115,37 @@ func TestResolveBlock(t *testing.T) {
 	}
 }
 
-func TestInboxOverview(t *testing.T) {
+func TestChildrenSummary(t *testing.T) {
 	k := testKB(t)
 
-	// Create inbox with children
-	k.CreateNode(ctx(), testRoot, "inbox", "", nil)
-	p := "inbox"
-	k.CreateNode(ctx(), testRoot, "Quick Note", "Some quick note text", &p)
-	k.CreateNode(ctx(), testRoot, "Discussion: Ideas", "let's discuss", &p)
-	k.CreateNode(ctx(), testRoot, "Empty Thing", "", &p)
-	k.CreateNode(ctx(), testRoot, "2024-01-15", "daily entry", &p)
+	// Create container with children
+	k.CreateNode(ctx(), testRoot, "Container", "", nil)
+	p := "Container"
+	k.CreateNode(ctx(), testRoot, "Note A", "some text", &p)
+	k.CreateNode(ctx(), testRoot, "Note B", "", &p)
 
-	// Add block triples for "Quick Note" to give it bullet blocks
-	assertBlockTriples(t, k, testRoot, "Quick Note", "0", "list-item", "first item", "")
-	assertBlockTriples(t, k, testRoot, "Quick Note", "1", "task", "do this", "")
-
-	items, err := k.InboxOverview(ctx(), testRoot, "inbox")
+	items, err := k.ChildrenSummary(ctx(), testRoot, "Container")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if len(items) != 4 {
-		t.Fatalf("expected 4 items, got %d", len(items))
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
 	}
 
-	// Items should be sorted by title (case-insensitive)
-	titles := make([]string, len(items))
-	for i, item := range items {
-		titles[i] = item.Title
-	}
-	sorted := make([]string, len(titles))
-	copy(sorted, titles)
-	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i] < sorted[j]
-	})
-
-	// Find each item by title and verify classification
-	byTitle := make(map[string]kb.InboxItem)
-	for _, item := range items {
-		byTitle[item.Title] = item
+	// Should be sorted by title
+	if items[0].Title != "Note A" || items[1].Title != "Note B" {
+		t.Fatalf("expected [Note A, Note B], got [%s, %s]", items[0].Title, items[1].Title)
 	}
 
-	if byTitle["Quick Note"].Kind != "capture" {
-		t.Fatalf("expected 'Quick Note' kind=capture, got %q", byTitle["Quick Note"].Kind)
+	// Note A has content, Note B is empty
+	if items[0].Empty {
+		t.Fatal("Note A should not be empty")
 	}
-	if byTitle["Discussion: Ideas"].Kind != "discussion" {
-		t.Fatalf("expected 'Discussion: Ideas' kind=discussion, got %q", byTitle["Discussion: Ideas"].Kind)
+	if !items[1].Empty {
+		t.Fatal("Note B should be empty")
 	}
-	if byTitle["Empty Thing"].Kind != "empty" {
-		t.Fatalf("expected 'Empty Thing' kind=empty, got %q", byTitle["Empty Thing"].Kind)
-	}
-	if byTitle["2024-01-15"].Kind != "date" {
-		t.Fatalf("expected '2024-01-15' kind=date, got %q", byTitle["2024-01-15"].Kind)
-	}
-}
-
-func TestInboxOverviewDefaultTitle(t *testing.T) {
-	k := testKB(t)
-
-	k.CreateNode(ctx(), testRoot, "inbox", "", nil)
-	p := "inbox"
-	k.CreateNode(ctx(), testRoot, "Child", "some text", &p)
-
-	// Pass empty string -- should default to "inbox"
-	items, err := k.InboxOverview(ctx(), testRoot, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(items) != 1 || items[0].Title != "Child" {
-		t.Fatalf("expected 1 item 'Child', got %v", items)
+	if items[0].CharCount == 0 {
+		t.Fatal("Note A should have non-zero char count")
 	}
 }

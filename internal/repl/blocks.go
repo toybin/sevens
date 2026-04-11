@@ -121,7 +121,7 @@ func (r *REPL) handleBlockDiff(tokens []string) error {
 }
 
 func (r *REPL) handleInbox(tokens []string) error {
-	root, ednOutput, nodeTitle, err := inboxArgs(tokens[1:])
+	root, _, nodeTitle, err := inboxArgs(tokens[1:])
 	if err != nil {
 		return err
 	}
@@ -129,54 +129,41 @@ func (r *REPL) handleInbox(tokens []string) error {
 		return err
 	}
 	if nodeTitle == "" {
-		nodeTitle = "inbox"
+		nodeTitle, _ = r.requireFocus()
+		if nodeTitle == "" {
+			return fmt.Errorf("no node specified and no focus active")
+		}
 	}
 	if r.graphQ == nil {
 		return fmt.Errorf("graph querier not available")
 	}
-	output, err := r.graphQ.BuildInboxOverview(r.root, nodeTitle)
+	items, err := r.graphQ.ChildrenSummary(r.root, nodeTitle)
 	if err != nil {
 		return err
 	}
-	if ednOutput {
-		r.lastBlocks = nil
-		return printEDN(output)
-	}
 
 	fmt.Println()
-	fmt.Println(ui.NodeTitle.Render(output.NodeTitle))
-	if len(output.Items) == 0 {
+	fmt.Println(ui.NodeTitle.Render(nodeTitle))
+	if len(items) == 0 {
 		r.printSystem("(none)")
 		return nil
 	}
 
-	titles := make([]string, 0, len(output.Items))
-	width := len(fmt.Sprintf("%d", len(output.Items)))
+	titles := make([]string, 0, len(items))
+	width := len(fmt.Sprintf("%d", len(items)))
 	r.lastBlocks = nil
-	for i, item := range output.Items {
+	for i, item := range items {
 		titles = append(titles, item.Title)
 		num := fmt.Sprintf("%*d.", width, i+1)
+		detail := fmt.Sprintf("%d chars", item.CharCount)
+		if item.Empty {
+			detail = "empty"
+		}
 		fmt.Printf("  %s %s  %s\n",
 			listNumStyle.Render(num),
 			ui.NodeTitle.Render(item.Title),
-			ui.Dim.Render(item.Kind),
+			ui.Dim.Render("("+detail+")"),
 		)
-		var parts []string
-		if item.Empty {
-			parts = append(parts, "empty")
-		} else {
-			parts = append(parts, fmt.Sprintf("%d chars", item.CharCount))
-		}
-		if item.BulletCount > 0 {
-			parts = append(parts, fmt.Sprintf("%d bullets", item.BulletCount))
-		}
-		if item.HeadingCount > 0 {
-			parts = append(parts, fmt.Sprintf("%d headings", item.HeadingCount))
-		}
-		if item.Error != "" {
-			parts = append(parts, "error: "+item.Error)
-		}
-		fmt.Printf("    %s\n", ui.Dim.Render(strings.Join(parts, " · ")))
 	}
 	r.lastList = titles
 	fmt.Println()

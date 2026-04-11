@@ -112,23 +112,11 @@ type BlockDiffOutput struct {
 	Deleted      []BlockDiffEntry
 }
 
-// InboxItemSummary describes one child in an inbox overview.
-type InboxItemSummary struct {
-	Title        string
-	FilePath     string
-	Kind         string
-	CharCount    int
-	BlockCount   int
-	HeadingCount int
-	BulletCount  int
-	Empty        bool
-	Error        string
-}
-
-// InboxOverview is the result of summarizing an inbox-like container.
-type InboxOverview struct {
-	NodeTitle string
-	Items     []InboxItemSummary
+// ChildSummary describes a child node's basic metrics.
+type ChildSummary struct {
+	Title     string
+	CharCount int
+	Empty     bool
 }
 
 // ExtractedNode is the result of preparing a block extraction.
@@ -160,7 +148,7 @@ type GraphQuerier interface {
 	// Block operations
 	BuildBlockList(root, nodeTitle string) (BlockListOutput, error)
 	BuildBlockDiff(root, nodeTitle string) (BlockDiffOutput, error)
-	BuildInboxOverview(root, nodeTitle string) (InboxOverview, error)
+	ChildrenSummary(root, nodeTitle string) ([]ChildSummary, error)
 	PrepareBlockExtraction(root, sourceTitle, blockPath, newTitle, parentTitle string) (ExtractedNode, error)
 	ResolveBlockTarget(root, nodeTitle, blockPath string) (*BlockTarget, error)
 	ResolveBlockTargetBySubject(subject string) (*BlockTarget, error)

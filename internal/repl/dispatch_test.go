@@ -750,7 +750,7 @@ func (q *testGraphQuerier) BuildWalk(root, title string, depth int) (*WalkOutput
 func (q *testGraphQuerier) BuildOverview(root string) (*OverviewOutput, error) { return nil, nil }
 func (q *testGraphQuerier) BuildBlockList(root, nodeTitle string) (BlockListOutput, error) { return BlockListOutput{}, nil }
 func (q *testGraphQuerier) BuildBlockDiff(root, nodeTitle string) (BlockDiffOutput, error) { return BlockDiffOutput{}, nil }
-func (q *testGraphQuerier) BuildInboxOverview(root, nodeTitle string) (InboxOverview, error) { return InboxOverview{}, nil }
+func (q *testGraphQuerier) ChildrenSummary(root, nodeTitle string) ([]ChildSummary, error) { return nil, nil }
 func (q *testGraphQuerier) PrepareBlockExtraction(root, sourceTitle, blockPath, newTitle, parentTitle string) (ExtractedNode, error) { return ExtractedNode{}, nil }
 func (q *testGraphQuerier) ResolveBlockTarget(root, nodeTitle, blockPath string) (*BlockTarget, error) { return nil, nil }
 func (q *testGraphQuerier) ResolveBlockTargetBySubject(subject string) (*BlockTarget, error) { return nil, nil }

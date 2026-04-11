@@ -2,7 +2,6 @@ package kb
 
 import (
 	"context"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -95,34 +94,34 @@ func (k *KB) ResolveBlock(ctx context.Context, root, nodeTitle, blockPath string
 	return entry, nil
 }
 
-// InboxItem describes a child node's classification for inbox display.
-type InboxItem struct {
-	Title        string
-	Kind         string // "note", "capture", "discussion", "empty", "date", "empty-date"
-	CharCount    int
-	BlockCount   int
-	HeadingCount int
-	BulletCount  int
-	Empty        bool
+// ChildSummary describes a child node's basic metrics. No domain
+// classification -- the KB doesn't know what an "inbox" or "capture" is.
+type ChildSummary struct {
+	Title     string
+	CharCount int
+	Empty     bool
 }
 
-var dateTitleRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
-
-// InboxOverview classifies children of a node for inbox-style display.
-func (k *KB) InboxOverview(ctx context.Context, root, nodeTitle string) ([]InboxItem, error) {
-	if nodeTitle == "" {
-		nodeTitle = "inbox"
-	}
-
+// ChildrenSummary returns basic metrics for each child of a node.
+func (k *KB) ChildrenSummary(ctx context.Context, root, nodeTitle string) ([]ChildSummary, error) {
 	children, err := k.Children(ctx, root, nodeTitle)
 	if err != nil {
 		return nil, err
 	}
 
-	var items []InboxItem
+	var items []ChildSummary
 	for _, childTitle := range children {
-		item := classifyChild(ctx, k, root, childTitle)
-		items = append(items, item)
+		subject := NodeSubject(root, childTitle)
+		charCount := 0
+		if cc, ok, _ := k.graph.Lookup(ctx, subject, PredNodeCharCount); ok {
+			charCount, _ = strconv.Atoi(cc)
+		}
+		content, _, _ := k.graph.Lookup(ctx, subject, PredNodeContent)
+		items = append(items, ChildSummary{
+			Title:     childTitle,
+			CharCount: charCount,
+			Empty:     strings.TrimSpace(content) == "",
+		})
 	}
 
 	sort.Slice(items, func(i, j int) bool {
@@ -130,59 +129,6 @@ func (k *KB) InboxOverview(ctx context.Context, root, nodeTitle string) ([]Inbox
 	})
 
 	return items, nil
-}
-
-func classifyChild(ctx context.Context, k *KB, root, title string) InboxItem {
-	subject := NodeSubject(root, title)
-	content, _, _ := k.graph.Lookup(ctx, subject, PredNodeContent)
-	charCount := 0
-	if cc, ok, _ := k.graph.Lookup(ctx, subject, PredNodeCharCount); ok {
-		charCount, _ = strconv.Atoi(cc)
-	}
-
-	item := InboxItem{
-		Title:     title,
-		CharCount: charCount,
-		Empty:     strings.TrimSpace(content) == "",
-	}
-
-	// Count blocks by kind
-	blockSubjects, _ := k.graph.Store().ByPredicateObject(ctx, PredBlockNode, subject)
-	item.BlockCount = len(blockSubjects)
-	for _, bs := range blockSubjects {
-		kind, _, _ := k.graph.Lookup(ctx, bs, PredBlockKind)
-		switch kind {
-		case "heading":
-			item.HeadingCount++
-		case "list-item", "task":
-			item.BulletCount++
-		}
-	}
-
-	// Classify
-	item.Kind = classifyInboxKind(title, item)
-	return item
-}
-
-func classifyInboxKind(title string, item InboxItem) string {
-	isDiscussion := strings.HasPrefix(strings.ToLower(title), "discussion:") ||
-		strings.HasPrefix(strings.ToLower(title), "discussion -")
-	isDate := dateTitleRe.MatchString(title)
-
-	switch {
-	case isDiscussion:
-		return "discussion"
-	case isDate && item.Empty:
-		return "empty-date"
-	case isDate:
-		return "date"
-	case item.Empty:
-		return "empty"
-	case item.BulletCount > 0:
-		return "capture"
-	default:
-		return "note"
-	}
 }
 
 // --- helpers ---
