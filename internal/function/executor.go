@@ -312,9 +312,18 @@ func (e *Executor) executeStep(ctx context.Context, root string, fn *Function, p
 		return nil, fmt.Errorf("backend execution for step %q: %w", step.Name, err)
 	}
 
-	// Apply output shape
-	if step.Output.Shape == ShapeText {
+	// Parse output based on step's declared shape
+	switch step.Output.Shape {
+	case ShapeText:
 		result.IsText = true
+	case ShapeFileOps:
+		ops, parseErr := ParseOps(result.Raw)
+		if parseErr == nil {
+			result.Ops = ops
+			result.IsText = false
+		}
+	case ShapeStructured:
+		result.IsText = false
 	}
 
 	// Complete the step (state transition)

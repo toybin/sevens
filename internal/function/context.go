@@ -4,16 +4,19 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
+	"sevens/internal/graphops"
 	"sevens/internal/kb"
 )
 
 // ResolvedContext holds all gathered graph context for rendering a step's prompt.
 type ResolvedContext struct {
-	Target   *kb.WalkContext
-	Roles    map[string]*kb.WalkContext // keyed by Require.As or Require.Role
-	Paths    map[string][]string        // keyed by PathSpec.As -> resolved titles
-	PrevStep string                     // output from the prior step
+	Target      *kb.WalkContext
+	Roles       map[string]*kb.WalkContext // keyed by Require.As or Require.Role
+	Paths       map[string][]string        // keyed by PathSpec.As -> resolved titles
+	PrevStep    string                     // output from the prior step
+	Instruction string                     // ad-hoc instruction from user
 }
 
 // ResolveContext gathers graph context for a step based on its Requires and Paths.
@@ -65,14 +68,28 @@ func ResolveContext(ctx context.Context, k *kb.KB, root, target string, step Ste
 		}
 	}
 
-	// Resolve path specs (graph walks)
+	// Resolve path specs via graphops.Compose
 	for _, ps := range step.Paths {
 		if ps.As == "" {
 			continue
 		}
-		// For now, use the walk context's existing data for common paths.
-		// Full morphism composition will use graphops.Compose when needed.
-		rc.Paths[ps.As] = nil // placeholder for future path resolution
+		subject := kb.NodeSubject(root, target)
+		path := graphops.ParsePath(ps.Path)
+		terminals, err := k.Graph().Compose(ctx, subject, path)
+		if err != nil {
+			continue // best-effort for path specs
+		}
+		if ps.ExcludeSelf {
+			terminals = excludeString(terminals, subject)
+		}
+		// Resolve terminal subjects to titles
+		var titles []string
+		for _, subj := range terminals {
+			if t, _, _ := k.Graph().Lookup(ctx, subj, kb.PredNodeTitle); t != "" {
+				titles = append(titles, t)
+			}
+		}
+		rc.Paths[ps.As] = titles
 	}
 
 	return rc, nil
@@ -96,6 +113,8 @@ func RenderPrompt(template string, rc *ResolvedContext) string {
 	}
 
 	result = strings.ReplaceAll(result, "{{prev}}", rc.PrevStep)
+	result = strings.ReplaceAll(result, "{{timestamp}}", time.Now().UTC().Format("2006-01-02T15:04:05Z"))
+	result = strings.ReplaceAll(result, "{{instruction}}", rc.Instruction)
 
 	// Resolve role-based placeholders: {{role.title}}, {{role.content}}
 	for key, walk := range rc.Roles {
@@ -111,5 +130,15 @@ func RenderPrompt(template string, rc *ResolvedContext) string {
 		result = strings.ReplaceAll(result, "{{"+key+"}}", strings.Join(titles, ", "))
 	}
 
+	return result
+}
+
+func excludeString(ss []string, exclude string) []string {
+	var result []string
+	for _, s := range ss {
+		if s != exclude {
+			result = append(result, s)
+		}
+	}
 	return result
 }
