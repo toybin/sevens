@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"olympos.io/encoding/edn"
-	"sevens/internal/store"
+	"sevens/internal/config"
 )
 
 // kwStr converts an edn.Keyword to a plain string (strips leading colon).
@@ -35,7 +35,7 @@ type Capabilities struct {
 
 // LoadCapabilities reads capabilities.edn from the sevens config directory.
 func LoadCapabilities() (*Capabilities, error) {
-	dir, err := store.ConfigDir()
+	dir, err := config.ConfigDir()
 	if err != nil {
 		return nil, fmt.Errorf("config dir: %w", err)
 	}

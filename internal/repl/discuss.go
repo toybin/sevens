@@ -1,7 +1,6 @@
 package repl
 
 import (
-	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,9 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"sevens/internal/apply"
 	projmd "sevens/internal/projection/md"
-	"sevens/internal/store"
 	"sevens/internal/ui"
 )
 
@@ -31,12 +28,17 @@ func isThreaded(filePath string) bool {
 	return headingCount > 1
 }
 
-func resolveDiscussionFilePath(db *sql.DB, root, discussTitle string) (string, error) {
-	subject, _ := store.ResolveNode(db, discussTitle, root)
+// resolveDiscussionFilePath looks up the file path for a discussion node.
+// It uses the REPL's graphQ interface.
+func (r *REPL) resolveDiscussionFilePath(root, discussTitle string) (string, error) {
+	if r.graphQ == nil {
+		return "", fmt.Errorf("graph querier not available")
+	}
+	subject, _ := r.graphQ.ResolveNode(discussTitle, root)
 	if subject == "" {
 		return "", nil
 	}
-	return store.GetObject(db, subject, "node/file-path")
+	return r.graphQ.GetObject(subject, "node/file-path")
 }
 
 // enterDiscussion starts or continues a discussion.
@@ -48,7 +50,7 @@ func (r *REPL) enterDiscussion(nonInteractive bool) error {
 		return err
 	}
 
-	fn, err := apply.LoadFunction("discuss")
+	fn, err := r.loadFunctionDef("discuss")
 	if err != nil {
 		return fmt.Errorf("loading discuss function: %w", err)
 	}
@@ -56,7 +58,7 @@ func (r *REPL) enterDiscussion(nonInteractive bool) error {
 	discussTitle := "Discussion - " + focus
 
 	// Check if the discussion file already exists before we create/modify it.
-	existingPath, _ := resolveDiscussionFilePath(r.db, r.root, discussTitle)
+	existingPath, _ := r.resolveDiscussionFilePath(r.root, discussTitle)
 	fileExistedBefore := existingPath != ""
 
 	// Check if the discussion is threaded — if so, force non-interactive.
@@ -85,7 +87,7 @@ func (r *REPL) enterDiscussion(nonInteractive bool) error {
 	r.resyncQuiet()
 
 	// Resolve the file path now (it may have just been created by the pipeline).
-	resolvedPath, _ := resolveDiscussionFilePath(r.db, r.root, discussTitle)
+	resolvedPath, _ := r.resolveDiscussionFilePath(r.root, discussTitle)
 
 	// Show the latest agent turns.
 	r.showDiscussionTurns(discussTitle)
@@ -154,7 +156,7 @@ func (r *REPL) handleDiscussionInput(line string) error {
 	focus := r.focus
 	discussTitle := r.discussNode
 
-	filePath, err := resolveDiscussionFilePath(r.db, r.root, discussTitle)
+	filePath, err := r.resolveDiscussionFilePath(r.root, discussTitle)
 	if err != nil || filePath == "" {
 		return fmt.Errorf("could not find discussion file for %q", discussTitle)
 	}
@@ -176,7 +178,7 @@ func (r *REPL) handleDiscussionInput(line string) error {
 	}
 
 	// Run discuss again.
-	fn, err := apply.LoadFunction("discuss")
+	fn, err := r.loadFunctionDef("discuss")
 	if err != nil {
 		return fmt.Errorf("loading discuss: %w", err)
 	}
@@ -219,9 +221,15 @@ func (r *REPL) endDiscussion() error {
 func (r *REPL) cancelDiscussion() error {
 	// Revert the draft commit if one was made during enterDiscussion.
 	if r.discussCommit != "" && projmd.IsGitRepo(r.root) {
-		if _, err := apply.RevertCommit(r.root, r.discussCommit); err != nil {
+		var revertErr error
+		if r.applyR != nil {
+			_, revertErr = r.applyR.RevertCommit(r.root, r.discussCommit)
+		} else {
+			revertErr = fmt.Errorf("apply runner not available")
+		}
+		if revertErr != nil {
 			fmt.Fprintf(os.Stderr, "%s could not revert draft commit %s: %v\n",
-				ui.Warning.Render("[warn]"), r.discussCommit, err)
+				ui.Warning.Render("[warn]"), r.discussCommit, revertErr)
 		}
 	} else if r.discussFilePath != "" {
 		// No commit was recorded — handle the file directly.
@@ -274,7 +282,7 @@ func (r *REPL) cancelDiscussion() error {
 
 // showDiscussionTurns reads the discussion file and prints the last agent turns.
 func (r *REPL) showDiscussionTurns(discussTitle string) {
-	filePath, err := resolveDiscussionFilePath(r.db, r.root, discussTitle)
+	filePath, err := r.resolveDiscussionFilePath(r.root, discussTitle)
 	if err != nil || filePath == "" {
 		return
 	}

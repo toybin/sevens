@@ -8,13 +8,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
-	"sevens/internal/apply"
 	"sevens/internal/backend"
 	"sevens/internal/config"
-	"sevens/internal/engine"
 	"sevens/internal/function"
 	"sevens/internal/projection"
 	projmd "sevens/internal/projection/md"
@@ -60,15 +57,10 @@ func applyCmd2() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			// Load function definition and convert to new type
-			fn, oldFn, err := function.LoadFunction(fnName)
+			// Load function definition
+			fn, _, err := function.LoadFunction(fnName)
 			if err != nil {
 				return fmt.Errorf("loading function: %w", err)
-			}
-
-			if dryRun {
-				// For dry-run, fall back to old pipeline which handles prompt rendering/display
-				return runPipeline(resolved, nodeTitle, oldFn, 0, "", true, !yes, nil, model, nil, backendFlag, "", "")
 			}
 
 			// Open KB stack
@@ -77,6 +69,21 @@ func applyCmd2() *cobra.Command {
 				return fmt.Errorf("opening KB: %w", err)
 			}
 			defer stack.Close()
+
+			if dryRun {
+				// Dry-run: render the prompt for the first step and print it
+				steps := fn.EffectiveSteps()
+				if len(steps) == 0 {
+					return fmt.Errorf("function %q has no steps", fnName)
+				}
+				rc, rcErr := function.ResolveContext(context.Background(), stack.KB, resolved, nodeTitle, steps[0], "")
+				if rcErr != nil {
+					return fmt.Errorf("resolving context: %w", rcErr)
+				}
+				prompt := function.RenderPrompt(steps[0].Backend.PromptTemplate, rc)
+				fmt.Println(prompt)
+				return nil
+			}
 
 			// Create backend
 			globalConfig, err := config.LoadGlobalConfig()
@@ -168,8 +175,7 @@ func acceptCmd2() *cobra.Command {
 					}
 				}
 				if len(matches) == 0 {
-					// Fall back to old suspension system
-					return runLegacyAccept(resolved, arg, with, !yes, backendFlag)
+					return fmt.Errorf("no pending suggestions for %s", nodeTitle)
 				}
 				if len(matches) > 1 {
 					fmt.Fprintf(os.Stderr, "%s multiple pending pipelines for %s:\n",
@@ -320,8 +326,7 @@ func rejectCmd2() *cobra.Command {
 					}
 				}
 				if len(matches) == 0 {
-					// Fall back to old system
-					return runLegacyReject(resolved, arg)
+					return fmt.Errorf("no pending suggestions for %s", nodeTitle)
 				}
 				if len(matches) > 1 {
 					fmt.Fprintf(os.Stderr, "%s multiple pending pipelines for %s:\n",
@@ -372,40 +377,22 @@ func pendingCmd2() *cobra.Command {
 
 			ps := function.NewPipelineStore(stack.Store)
 
-			// New pipeline-based pending
 			pipelines, err := ps.FindPending(context.Background(), resolved)
 			if err != nil {
 				return fmt.Errorf("listing pending pipelines: %w", err)
 			}
 
-			// Also check old suspension system
-			db, err := openDB()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			oldSuspensions, _ := engine.ListSuspensions(db, resolved)
-
-			if len(pipelines) == 0 && len(oldSuspensions) == 0 {
+			if len(pipelines) == 0 {
 				fmt.Fprintln(os.Stderr, "No pending suggestions")
 				return nil
 			}
 
-			// Display new pipelines
 			for _, p := range pipelines {
 				steps := ""
 				if p.CurrentStep > 0 {
 					steps = fmt.Sprintf("step %d", p.CurrentStep)
 				}
 				fmt.Println(ui.FormatPending(p.Target, p.FunctionName, steps, "", p.ID))
-			}
-
-			// Display old suspensions
-			for _, sus := range oldSuspensions {
-				fmt.Println(ui.FormatPending(
-					orDefault(sus.TargetLabel, sus.Target),
-					sus.Function, sus.StepName, sus.Summary, sus.Subject))
 			}
 
 			return nil
@@ -449,275 +436,4 @@ func displayApplyResult(result *function.ApplyResult, fn *function.Function, nod
 			fmt.Println(ui.RenderMarkdownOrPlain(result.Result.Raw))
 		}
 	}
-}
-
-// runLegacyAccept falls back to the old engine.Suspension-based accept.
-// TODO: remove once all old suspensions are cleared from user databases.
-func runLegacyAccept(resolved, arg, with string, confirm bool, backendFlag string) error {
-	db, err := openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	var sus *engine.Suspension
-	var susSubject string
-
-	if strings.HasPrefix(arg, "suspension:") {
-		sus, err = engine.FindSuspensionBySubject(db, resolved, arg)
-		if err != nil {
-			return fmt.Errorf("finding pending: %w", err)
-		}
-		if sus == nil {
-			return fmt.Errorf("no pending suspension with id %s", arg)
-		}
-		susSubject = arg
-	} else {
-		nodeTitle, rerr := resolveNodeTitle(arg)
-		if rerr != nil {
-			return rerr
-		}
-		all, ferr := engine.FindSuspensions(db, resolved, nodeTitle)
-		if ferr != nil {
-			return fmt.Errorf("finding pending: %w", ferr)
-		}
-		if len(all) == 0 {
-			return fmt.Errorf("no pending suggestions for %s", nodeTitle)
-		}
-		if len(all) > 1 {
-			fmt.Fprintf(os.Stderr, "%s multiple pending suspensions for %s:\n",
-				ui.Warning.Render("[ambiguous]"), ui.NodeTitle.Render(nodeTitle))
-			for _, s := range all {
-				fmt.Println(ui.FormatPending(orDefault(s.TargetLabel, s.Target), s.Function, s.StepName, s.Summary, s.Subject))
-			}
-			return fmt.Errorf("ambiguous: pass the suspension id instead of the node title")
-		}
-		sus = &all[0]
-		susSubject = sus.Subject
-	}
-	nodeTitle := sus.Target
-
-	fn, err := apply.LoadFunction(sus.Function)
-	if err != nil {
-		return fmt.Errorf("loading function: %w", err)
-	}
-
-	steps := fn.EffectiveSteps()
-	nextStep := sus.StepIndex + 1
-
-	if with != "" {
-		// Revision path -- delegate back to old engine
-		stepIndex := sus.StepIndex
-		if stepIndex >= len(steps) {
-			stepIndex = len(steps) - 1
-		}
-		step := steps[stepIndex]
-
-		var streamTo *os.File
-		if step.Output == "text" {
-			streamTo = os.Stderr
-		}
-
-		globalConfig, _ := config.LoadGlobalConfig()
-		resolvedBackend := backendFlag
-		if resolvedBackend == "" {
-			resolvedBackend = sus.Backend
-		}
-		be, beErr := backend.FromConfig(globalConfig, resolvedBackend)
-		if beErr != nil {
-			fmt.Fprintf(os.Stderr, "[warn] backend init: %v, falling back to API\n", beErr)
-		}
-
-		newEntry, llmOutput, err := engine.ReviseStep(engine.ReviseConfig{
-			DB:         db,
-			Root:       resolved,
-			NodeTitle:  nodeTitle,
-			Function:   fn,
-			Suspension: sus,
-			Feedback:   with,
-			Confirm:    confirm,
-			StreamText: streamTo,
-			Backend:    be,
-		})
-		if err != nil {
-			return err
-		}
-		if newEntry == nil {
-			fmt.Fprintf(os.Stderr, "%s Cancelled by user\n", ui.Warning.Render("[abort]"))
-			return nil
-		}
-
-		isLastStep := stepIndex == len(steps)-1
-		if isLastStep && step.Output == "ops" {
-			newEntry.Summary = summarizeOutput("ops", llmOutput, newEntry.Ops)
-			printSuggestion(*newEntry)
-		} else if isLastStep {
-			fmt.Fprintln(os.Stderr, ui.FormatStep(sus.Function, step.Name, orDefault(sus.TargetLabel, nodeTitle)))
-			fmt.Println(ui.RenderMarkdownOrPlain(llmOutput))
-		} else {
-			fmt.Fprintln(os.Stderr, ui.FormatStep(fn.Name, step.Name, orDefault(sus.TargetLabel, nodeTitle)))
-			printIntermediateOutput(llmOutput)
-			fmt.Fprintf(os.Stderr, "\nRun `sevens accept %q` to approve and continue.\n", nodeTitle)
-		}
-
-		revBackendName := ""
-		if be != nil {
-			revBackendName = be.Name()
-		}
-		engine.WriteSuspension(db, resolved, nodeTitle, orDefault(sus.TargetLabel, nodeTitle), resolveSuspensionBlockForCLI(db, resolved, nodeTitle, sus), sus.Function, step.Name, sus.GateType, step.Output, newEntry.RawOutput, stepIndex, newEntry.Summary, newEntry.Ops, revBackendName)
-		engine.ResolveSuspension(db, susSubject, "revised")
-		return nil
-	}
-
-	// Accept path
-	if nextStep < len(steps) {
-		acceptEntry := apply.LogEntry{
-			Event:     "accepted",
-			Root:      resolved,
-			Function:  sus.Function,
-			Target:    nodeTitle,
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-		}
-		if err := apply.AppendLogDB(db, acceptEntry); err != nil {
-			return fmt.Errorf("appending log: %w", err)
-		}
-		engine.ResolveSuspension(db, susSubject, "accepted")
-
-		pipelineBackend := backendFlag
-		if pipelineBackend == "" {
-			pipelineBackend = sus.Backend
-		}
-		return runPipeline(resolved, nodeTitle, fn, nextStep, sus.Output, false, confirm, nil, "", nil, pipelineBackend, sus.BlockPath, sus.BlockID)
-	}
-
-	// Last step
-	lastStep := steps[sus.StepIndex]
-	if lastStep.Output != "ops" {
-		acceptEntry := apply.LogEntry{
-			Event:     "accepted",
-			Root:      resolved,
-			Function:  sus.Function,
-			Target:    nodeTitle,
-			Timestamp: time.Now().UTC().Format(time.RFC3339),
-		}
-		if err := apply.AppendLogDB(db, acceptEntry); err != nil {
-			return fmt.Errorf("appending log: %w", err)
-		}
-		engine.ResolveSuspension(db, susSubject, "accepted")
-		fmt.Fprintf(os.Stderr, "%s Acknowledged %s output for %s\n",
-			ui.Success.Render("[accept]"), lastStep.Output, ui.NodeTitle.Render(nodeTitle))
-		return nil
-	}
-
-	created, edited, err := apply.ExecuteOps(sus.Ops, resolved, db)
-	if err != nil {
-		return fmt.Errorf("executing ops: %w", err)
-	}
-
-	acceptEntry := apply.LogEntry{
-		Event:     "accepted",
-		Root:      resolved,
-		Function:  sus.Function,
-		Target:    nodeTitle,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-	}
-	if err := apply.AppendLogDB(db, acceptEntry); err != nil {
-		return fmt.Errorf("appending log: %w", err)
-	}
-	engine.ResolveSuspension(db, susSubject, "accepted")
-
-	commitHash := ""
-	if apply.IsGitRepo(resolved) {
-		allFiles := append(created, edited...)
-		if len(allFiles) > 0 {
-			hash, cerr := apply.CommitFiles(resolved,
-				fmt.Sprintf("sevens: apply %s to %q", sus.Function, nodeTitle), allFiles)
-			if cerr != nil {
-				fmt.Fprintf(os.Stderr, "%s git commit failed: %v\n", ui.Success.Render("[accept]"), cerr)
-			} else {
-				commitHash = hash
-			}
-		}
-	}
-
-	appliedEntry := apply.LogEntry{
-		Event:        "applied",
-		Root:         resolved,
-		Function:     sus.Function,
-		Target:       nodeTitle,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339),
-		Commit:       commitHash,
-		FilesCreated: created,
-		FilesEdited:  edited,
-	}
-	if err := apply.AppendLogDB(db, appliedEntry); err != nil {
-		return fmt.Errorf("appending log: %w", err)
-	}
-
-	if err := syncRoot(resolved); err != nil {
-		fmt.Fprintf(os.Stderr, "%s re-sync failed: %v\n", ui.Success.Render("[accept]"), err)
-	}
-
-	return nil
-}
-
-// runLegacyReject falls back to the old engine.Suspension-based reject.
-// TODO: remove once all old suspensions are cleared from user databases.
-func runLegacyReject(resolved, arg string) error {
-	db, err := openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	var sus *engine.Suspension
-	var susSubject string
-
-	if strings.HasPrefix(arg, "suspension:") {
-		sus, err = engine.FindSuspensionBySubject(db, resolved, arg)
-		if err != nil {
-			return fmt.Errorf("finding pending: %w", err)
-		}
-		if sus == nil {
-			return fmt.Errorf("no pending suspension with id %s", arg)
-		}
-		susSubject = arg
-	} else {
-		nodeTitle, rerr := resolveNodeTitle(arg)
-		if rerr != nil {
-			return rerr
-		}
-		all, ferr := engine.FindSuspensions(db, resolved, nodeTitle)
-		if ferr != nil {
-			return fmt.Errorf("finding pending: %w", ferr)
-		}
-		if len(all) == 0 {
-			return fmt.Errorf("no pending suggestions for %s", nodeTitle)
-		}
-		if len(all) > 1 {
-			fmt.Fprintf(os.Stderr, "%s multiple pending suspensions for %s:\n",
-				ui.Warning.Render("[ambiguous]"), ui.NodeTitle.Render(nodeTitle))
-			for _, s := range all {
-				fmt.Println(ui.FormatPending(orDefault(s.TargetLabel, s.Target), s.Function, s.StepName, s.Summary, s.Subject))
-			}
-			return fmt.Errorf("ambiguous: pass the suspension id instead of the node title")
-		}
-		sus = &all[0]
-		susSubject = sus.Subject
-	}
-	nodeTitle := sus.Target
-
-	entry := apply.LogEntry{
-		Event:     "rejected",
-		Root:      resolved,
-		Target:    nodeTitle,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-	}
-	if err := apply.AppendLogDB(db, entry); err != nil {
-		return fmt.Errorf("appending log: %w", err)
-	}
-
-	engine.ResolveSuspension(db, susSubject, "rejected")
-	fmt.Fprintf(os.Stderr, "%s %s\n", ui.Warning.Render("Rejected suggestions for"), ui.NodeTitle.Render(nodeTitle))
-	return nil
 }

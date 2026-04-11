@@ -4,8 +4,6 @@ import (
 	"strings"
 
 	"github.com/chzyer/readline"
-	"sevens/internal/apply"
-	"sevens/internal/graph"
 )
 
 // dotCommands is the fixed list of dot commands for tab completion.
@@ -102,7 +100,10 @@ func (c *completer) Do(line []rune, pos int) (newLine [][]rune, length int) {
 
 	if strings.HasPrefix(trimmed, "instantiate ") {
 		prefix := strings.TrimPrefix(trimmed, "instantiate ")
-		names, _ := apply.ListTemplates()
+		var names []string
+		if c.r.templateR != nil {
+			names, _ = c.r.templateR.ListTemplates()
+		}
 		return completeFrom(names, prefix), len(prefix)
 	}
 
@@ -139,7 +140,10 @@ func completeFrom(candidates []string, prefix string) [][]rune {
 
 // groupNames returns @-prefixed group names from .sevens.edn for tab completion.
 func (r *REPL) groupNames() []string {
-	config, err := graph.LoadConfig(r.root)
+	if r.graphQ == nil {
+		return nil
+	}
+	config, err := r.graphQ.LoadConfig(r.root)
 	if err != nil {
 		return nil
 	}

@@ -18,26 +18,32 @@ import (
 	"sevens/internal/apply"
 	"sevens/internal/backend"
 	"sevens/internal/config"
-	"sevens/internal/engine"
 	"sevens/internal/function"
 	"sevens/internal/graph"
 	"sevens/internal/kb"
 	"sevens/internal/projection"
 	projmd "sevens/internal/projection/md"
-	"sevens/internal/store"
 	"sevens/internal/ui"
+	_ "turso.tech/database/tursogo"
 )
 
 // openDB opens the central sevens database and ensures the schema exists.
 func openDB() (*sql.DB, error) {
-	db, err := store.OpenDB()
+	dir, err := config.ConfigDir()
 	if err != nil {
-		return nil, fmt.Errorf("opening database: %w", err)
+		return nil, fmt.Errorf("config dir: %w", err)
 	}
-	if err := store.InitTriplesSchema(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("initialising schema: %w", err)
+	db, err := sql.Open("turso", filepath.Join(dir, "sevens.db"))
+	if err != nil {
+		return nil, fmt.Errorf("open database: %w", err)
 	}
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not set WAL mode: %v\n", err)
+	}
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not set busy_timeout: %v\n", err)
+	}
+	db.SetMaxOpenConns(1)
 	return db, nil
 }
 
@@ -117,7 +123,7 @@ func syncRoot(rootDir string) error {
 	defer stack.Close()
 
 	// Register root (still using old store for roots.edn)
-	if err := store.AddRoot(root); err != nil {
+	if err := config.AddRoot(root); err != nil {
 		return fmt.Errorf("updating roots registry: %w", err)
 	}
 
@@ -149,7 +155,7 @@ func syncRoot(rootDir string) error {
 }
 
 func syncAllRoots() error {
-	roots, err := store.LoadRoots()
+	roots, err := config.LoadRoots()
 	if err != nil {
 		return fmt.Errorf("loading roots: %w", err)
 	}
@@ -264,38 +270,6 @@ func formatCharCount(n int) string {
 	return fmt.Sprintf("%d", n)
 }
 
-func printTree(output *graph.OverviewOutput) {
-	// Legacy printTree for EDN compat paths.
-	printTreeFromNodes(overviewNodesToKB(output.Nodes), nil)
-
-	v := output.Validation
-	if len(v.Orphans) > 0 || len(v.MissingParents) > 0 {
-		fmt.Println()
-	}
-	for _, o := range v.Orphans {
-		fmt.Println(o + " " + ui.Warning.Render("(orphan)"))
-	}
-	for _, mp := range v.MissingParents {
-		fmt.Println(mp + " " + ui.Warning.Render("(missing parent)"))
-	}
-}
-
-// overviewNodesToKB converts old graph.OverviewNode to kb.OverviewNode.
-func overviewNodesToKB(nodes []graph.OverviewNode) []kb.OverviewNode {
-	result := make([]kb.OverviewNode, len(nodes))
-	for i, n := range nodes {
-		result[i] = kb.OverviewNode{
-			Title:      n.Title,
-			Parent:     n.Parent,
-			Children:   n.Children,
-			ChildCount: n.ChildCount,
-			CrossRefs:  n.CrossRefs,
-			CharCount:  n.CharCount,
-		}
-	}
-	return result
-}
-
 // printTreeFromNodes prints a tree from kb.OverviewNode slice.
 // violations is optional -- printed after the tree.
 func printTreeFromNodes(nodes []kb.OverviewNode, violations []kb.Violation) {
@@ -367,7 +341,7 @@ func printTreeFromNodes(nodes []kb.OverviewNode, violations []kb.Violation) {
 }
 
 // opName returns a display name for a FileOp.
-func opName(op apply.FileOp) string {
+func opName(op function.FileOp) string {
 	if op.Title != "" {
 		return op.Title
 	}
@@ -375,47 +349,6 @@ func opName(op apply.FileOp) string {
 		return op.File
 	}
 	return "unknown"
-}
-
-// printSuggestion prints a human-readable summary of a suggested LogEntry.
-func printSuggestion(entry apply.LogEntry) {
-	fmt.Fprintln(os.Stderr, ui.FormatStep(entry.Function, "suggest", entry.Target))
-	for _, op := range entry.Ops {
-		fmt.Fprintln(os.Stderr, ui.FormatOp(op.Action, opName(op)))
-	}
-	fmt.Fprintf(os.Stderr, "\nRun `sevens accept %q` to apply.\n", entry.Target)
-}
-
-// buildRevisionHistory reads the log for a node and constructs the full
-// suggestion/revision conversation thread for the given step index.
-
-// printIntermediateOutput tries to format LLM output as a readable list.
-// Falls back to rendering as markdown if it can't parse as structured data.
-func printIntermediateOutput(raw string) {
-	s := strings.TrimSpace(raw)
-	if strings.HasPrefix(s, "```") {
-		lines := strings.Split(s, "\n")
-		start := 1
-		end := len(lines) - 1
-		for end > start && strings.TrimSpace(lines[end]) != "```" {
-			end--
-		}
-		s = strings.TrimSpace(strings.Join(lines[start:end], "\n"))
-	}
-
-	var items []struct {
-		Title     string `json:"title"`
-		Rationale string `json:"rationale"`
-	}
-	if err := json.Unmarshal([]byte(s), &items); err == nil && len(items) > 0 {
-		for i, item := range items {
-			fmt.Fprintf(os.Stderr, "  %d. %s\n     %s\n", i+1, item.Title, item.Rationale)
-		}
-		return
-	}
-
-	// Fallback: render as markdown
-	fmt.Print(ui.RenderMarkdownOrPlain(raw))
 }
 
 // completeNodeTitles provides dynamic completion for node title arguments.
@@ -491,24 +424,6 @@ func overviewCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			// EDN output uses legacy path for backward compat
-			if ednOutput {
-				config, err := graph.LoadConfig(resolved)
-				if err != nil {
-					return fmt.Errorf("loading config: %w", err)
-				}
-				db, err := openDB()
-				if err != nil {
-					return err
-				}
-				defer db.Close()
-				output, err := graph.BuildOverview(db, resolved, config)
-				if err != nil {
-					return fmt.Errorf("building overview: %w", err)
-				}
-				return printEDN(output)
-			}
-
 			stack, err := openKB()
 			if err != nil {
 				return err
@@ -518,6 +433,10 @@ func overviewCmd() *cobra.Command {
 			nodes, err := stack.KB.Overview(context.Background(), resolved)
 			if err != nil {
 				return fmt.Errorf("building overview: %w", err)
+			}
+
+			if ednOutput {
+				return printEDN(nodes)
 			}
 
 			violations, err := stack.KB.Validate(context.Background(), resolved, 9, 0)
@@ -556,21 +475,6 @@ func walkCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			// EDN output still uses legacy path for backward compat
-			if ednOutput {
-				db, err := openDB()
-				if err != nil {
-					return err
-				}
-				defer db.Close()
-				output, err := graph.BuildWalk(db, resolved, nodeTitle, depth)
-				if err != nil {
-					return fmt.Errorf("building walk: %w", err)
-				}
-				return printEDN(output)
-			}
-
-			// Non-EDN path uses new KB
 			stack, err := openKB()
 			if err != nil {
 				return err
@@ -580,6 +484,10 @@ func walkCmd() *cobra.Command {
 			w, err := stack.KB.Walk(context.Background(), resolved, nodeTitle)
 			if err != nil {
 				return fmt.Errorf("walking node: %w", err)
+			}
+
+			if ednOutput {
+				return printEDN(w)
 			}
 
 			fmt.Print(ui.FormatNodeHeader(
@@ -618,24 +526,6 @@ func treeCmd() *cobra.Command {
 			resolved, err := resolveRoot(root)
 			if err != nil {
 				return fmt.Errorf("resolving root: %w", err)
-			}
-
-			// EDN output uses legacy path
-			if ednOutput {
-				config, err := graph.LoadConfig(resolved)
-				if err != nil {
-					return fmt.Errorf("loading config: %w", err)
-				}
-				db, err := openDB()
-				if err != nil {
-					return err
-				}
-				defer db.Close()
-				output, err := graph.BuildOverview(db, resolved, config)
-				if err != nil {
-					return fmt.Errorf("building overview: %w", err)
-				}
-				return printEDN(output)
 			}
 
 			stack, err := openKB()
@@ -996,7 +886,7 @@ func rootsCmd() *cobra.Command {
 		Use:   "roots",
 		Short: "List all registered sevens roots",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			roots, err := store.LoadRoots()
+			roots, err := config.LoadRoots()
 			if err != nil {
 				return fmt.Errorf("loading roots: %w", err)
 			}
@@ -1018,7 +908,7 @@ func rootsCmd() *cobra.Command {
 }
 
 // summarizeOutput generates a brief summary string from LLM output based on the output type.
-func summarizeOutput(outputType, llmOutput string, ops []apply.FileOp) string {
+func summarizeOutput(outputType, llmOutput string, ops []function.FileOp) string {
 	if outputType == "ops" && len(ops) > 0 {
 		var parts []string
 		creates, edits := 0, 0
@@ -1061,247 +951,41 @@ func summarizeOutput(outputType, llmOutput string, ops []apply.FileOp) string {
 	return summary
 }
 
-func resolveSuspensionBlockForCLI(db *sql.DB, root, nodeTitle string, sus *engine.Suspension) *graph.BlockTarget {
-	if sus == nil {
-		return nil
-	}
-	if sus.BlockID != "" {
-		if block, err := graph.ResolveBlockTargetBySubject(db, sus.BlockID); err == nil {
-			return block
-		}
-	}
-	if sus.BlockPath != "" {
-		if block, err := graph.ResolveBlockTarget(db, root, nodeTitle, sus.BlockPath); err == nil {
-			return block
-		}
-	}
-	return nil
-}
-
-// runPipeline runs function steps starting from startStep using the engine.
-// Returns when a gate is hit (suspension) or all steps complete.
-// allowedSteps, if non-nil, restricts execution to only the named steps.
-func runPipeline(root, nodeTitle string, fn *apply.Function, startStep int, prev string, dryRun bool, confirm bool, includes []string, model string, allowedSteps map[string]bool, backendName string, blockPath string, blockID string) error {
-	db, err := openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-
-	walk, err := graph.BuildWalk(db, root, nodeTitle, 1)
-	if err != nil {
-		return fmt.Errorf("building walk: %w", err)
-	}
-	var targetBlock *graph.BlockTarget
-	if blockID != "" {
-		targetBlock, err = graph.ResolveBlockTargetBySubject(db, blockID)
-		if err != nil {
-			return fmt.Errorf("resolving block target: %w", err)
-		}
-	} else if blockPath != "" {
-		targetBlock, err = graph.ResolveBlockTarget(db, root, nodeTitle, blockPath)
-		if err != nil {
-			return fmt.Errorf("resolving block target: %w", err)
-		}
-	}
-	targetLabel := nodeTitle
-	if targetBlock != nil {
-		targetLabel = targetBlock.Label()
-	}
-
-	globalConfig, err := config.LoadGlobalConfig()
-	if err != nil {
-		return fmt.Errorf("loading global config: %w", err)
-	}
-
-	if model != "" {
-		resolved := globalConfig.ResolveModel(model)
-		if resolved.Model != globalConfig.LLM.Model || model == resolved.Model {
-			globalConfig.LLM = resolved
-		} else {
-			globalConfig.LLM.Model = model
-		}
-	}
-
-	// Build context from global config + function-level + node-level context files.
-	var allContextFiles []string
-	allContextFiles = append(allContextFiles, globalConfig.ContextFiles...)
-	allContextFiles = append(allContextFiles, fn.ContextFiles...)
-	allContextFiles = append(allContextFiles, walk.Node.ContextFiles...)
-	contextStr := apply.LoadContextFiles(root, allContextFiles)
-
-	session, _ := apply.LoadSession()
-	if session != nil && len(session.Includes) > 0 {
-		for _, inc := range session.Includes {
-			incWalk, err := graph.BuildWalk(db, root, inc, 0)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "%s included node %q: %v\n", ui.Warning.Render("[warn]"), inc, err)
-				continue
-			}
-			contextStr += fmt.Sprintf("<included-node title=%q>\n%s\n</included-node>\n\n", inc, incWalk.Node.Content)
-		}
-	}
-
-	// Auto-include group if node has include-group: true in frontmatter.
-	config, _ := graph.LoadConfig(root)
-	autoIncludes, _ := graph.AutoGroupIncludes(db, root, nodeTitle, config)
-
-	// One-shot includes from --include flag (supports @GroupName)
-	resolvedIncludes := append([]string{}, autoIncludes...)
-	for _, inc := range includes {
-		if strings.HasPrefix(inc, "@") {
-			groupName := inc[1:]
-			config, cerr := graph.LoadConfig(root)
-			if cerr != nil {
-				fmt.Fprintf(os.Stderr, "%s loading config for group %q: %v\n", ui.Warning.Render("[warn]"), groupName, cerr)
-				continue
-			}
-			grp, ok := config.Groups[groupName]
-			if !ok {
-				fmt.Fprintf(os.Stderr, "%s group %q not found\n", ui.Warning.Render("[warn]"), groupName)
-				continue
-			}
-			titles, gerr := graph.ResolveGroup(db, root, grp)
-			if gerr != nil {
-				fmt.Fprintf(os.Stderr, "%s resolving group %q: %v\n", ui.Warning.Render("[warn]"), groupName, gerr)
-				continue
-			}
-			resolvedIncludes = append(resolvedIncludes, titles...)
-		} else {
-			resolvedIncludes = append(resolvedIncludes, inc)
-		}
-	}
-	for _, inc := range resolvedIncludes {
-		incWalk, err := graph.BuildWalk(db, root, inc, 0)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s included node %q: %v\n", ui.Warning.Render("[warn]"), inc, err)
-			continue
-		}
-		contextStr += fmt.Sprintf("<included-node title=%q>\n%s\n</included-node>\n\n", inc, incWalk.Node.Content)
-	}
-
-	// Create inference backend
-	var be backend.Backend
-	if !dryRun {
-		var beErr error
-		be, beErr = backend.FromConfig(globalConfig, backendName)
-		if beErr != nil {
-			return fmt.Errorf("initializing backend: %w", beErr)
-		}
-		if model != "" {
-			fmt.Fprintf(os.Stderr, "[backend] %s (model: %s)\n", be.Name(), model)
-		} else {
-			fmt.Fprintf(os.Stderr, "[backend] %s\n", be.Name())
-		}
-	}
-
-	cfg := engine.PipelineConfig{
-		DB:            db,
-		Root:          root,
-		NodeTitle:     nodeTitle,
-		TargetBlock:   targetBlock,
-		Function:      fn,
-		GlobalConfig:  globalConfig,
-		Walk:          walk,
-		ContextStr:    contextStr,
-		DryRun:        dryRun,
-		Confirm:       confirm,
-		StreamText:    true,
-		AllowedSteps:  allowedSteps,
-		Backend:       be,
-		ModelOverride: model,
-	}
-
-	result := engine.RunPipeline(context.Background(), cfg, startStep, prev)
-
-	if result.IsLeft() {
-		// Suspension — display what was suggested
-		sus := result.MustLeft()
-		if sus.OutputType == "ops" && len(sus.Ops) > 0 {
-			fmt.Fprintln(os.Stderr, ui.FormatStep(sus.Function, sus.StepName, orDefault(sus.TargetLabel, sus.Target)))
-			for _, op := range sus.Ops {
-				fmt.Fprintln(os.Stderr, ui.FormatOp(op.Action, opName(op)))
-			}
-			fmt.Fprintf(os.Stderr, "\nRun `sevens accept %q` to apply.\n", sus.Target)
-		} else {
-			fmt.Fprintln(os.Stderr, ui.FormatStep(sus.Function, sus.StepName, orDefault(sus.TargetLabel, sus.Target)))
-			fmt.Fprintln(os.Stderr)
-			fmt.Print(ui.RenderMarkdownOrPlain(sus.Output))
-			fmt.Fprintf(os.Stderr, "\nRun `sevens accept %q` to approve and continue.\n", sus.Target)
-		}
-	} else {
-		// Completed — display final output
-		res := result.MustRight()
-		if res.OutputType == "ops" && len(res.Ops) == 0 {
-			fmt.Fprintln(os.Stderr, ui.FormatStep(fn.Name, res.StepName, targetLabel))
-			fmt.Fprintln(os.Stderr, "No changes proposed.")
-		} else if res.Output != "" && res.OutputType == "text" && be == nil {
-			// Text was already streamed via API streaming, just show the label
-			fmt.Fprintln(os.Stderr, ui.FormatStep(fn.Name, res.StepName, targetLabel))
-		} else if res.Output != "" {
-			fmt.Fprintln(os.Stderr, ui.FormatStep(fn.Name, res.StepName, targetLabel))
-			fmt.Println(ui.RenderMarkdownOrPlain(res.Output))
-		}
-	}
-
-	return nil
-}
-
-func applyCmd() *cobra.Command {
-	var root string
-	var dryRun bool
-	var yes bool
-	var includes []string
-	var model string
-	var backendFlag string
-	var blockPath string
-
-	cmd := &cobra.Command{
-		Use:   "apply <function> <node-title>",
-		Short: "Apply a function to a node or a block within it",
-		Args:  cobra.ExactArgs(2),
-		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-			if len(args) == 0 {
-				return completeFunctionNames(cmd, args, toComplete)
-			}
-			return completeNodeTitles(cmd, args, toComplete)
-		},
+func functionsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "functions",
+		Short: "List available functions",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			function := args[0]
-			nodeTitle, err := resolveNodeTitle(args[1])
+			functions, err := function.ListFunctionDefs()
 			if err != nil {
-				return err
+				return fmt.Errorf("listing functions: %w", err)
 			}
 
-			resolved, err := resolveRoot(root)
-			if err != nil {
-				return fmt.Errorf("resolving root: %w", err)
+			if len(functions) == 0 {
+				fmt.Fprintln(os.Stderr, "No functions defined")
+				return nil
 			}
 
-			fn, err := apply.LoadFunction(function)
-			if err != nil {
-				return fmt.Errorf("loading function: %w", err)
+			maxLen := 0
+			for _, fn := range functions {
+				if len(fn.Name) > maxLen {
+					maxLen = len(fn.Name)
+				}
 			}
 
-			return runPipeline(resolved, nodeTitle, fn, 0, "", dryRun, !yes, includes, model, nil, backendFlag, blockPath, "")
+			for _, fn := range functions {
+				padding := strings.Repeat(" ", maxLen-len(fn.Name))
+				fmt.Fprintf(os.Stdout, "%s%s  %s\n", ui.Label.Render(fn.Name), padding, ui.Dim.Render(fn.Description))
+			}
+			return nil
 		},
 	}
-
-	cmd.Flags().StringVar(&root, "root", "", "Root directory")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print rendered prompt without calling LLM")
-	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip cost confirmation")
-	cmd.Flags().StringSliceVar(&includes, "include", nil, "Additional node titles to include as context")
-	cmd.Flags().StringVar(&model, "model", "", "Model name or profile to use (e.g., 'fast', 'powerful', or 'claude-opus-4-6')")
-	cmd.Flags().StringVar(&backendFlag, "backend", "", "Inference backend (codex, claude, anthropic)")
-	cmd.Flags().StringVar(&blockPath, "block", "", "Block path within the node to target")
-	return cmd
 }
 
 func discussCmd() *cobra.Command {
 	var root string
 	var dryRun bool
 	var yes bool
-	var includes []string
 	var model string
 	var backendFlag string
 
@@ -1321,423 +1005,64 @@ func discussCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			fn, err := apply.LoadFunction("discuss")
+			fn, _, err := function.LoadFunction("discuss")
 			if err != nil {
 				return fmt.Errorf("loading function: %w", err)
 			}
 
-			return runPipeline(resolved, nodeTitle, fn, 0, "", dryRun, !yes, includes, model, nil, backendFlag, "", "")
+			stack, serr := openKB()
+			if serr != nil {
+				return fmt.Errorf("opening KB: %w", serr)
+			}
+			defer stack.Close()
+
+			if dryRun {
+				steps := fn.EffectiveSteps()
+				if len(steps) == 0 {
+					return fmt.Errorf("discuss function has no steps")
+				}
+				rc, rcErr := function.ResolveContext(context.Background(), stack.KB, resolved, nodeTitle, steps[0], "")
+				if rcErr != nil {
+					return fmt.Errorf("resolving context: %w", rcErr)
+				}
+				prompt := function.RenderPrompt(steps[0].Backend.PromptTemplate, rc)
+				fmt.Println(prompt)
+				return nil
+			}
+
+			globalConfig, _ := config.LoadGlobalConfig()
+			if model != "" {
+				resolvedModel := globalConfig.ResolveModel(model)
+				if resolvedModel.Model != globalConfig.LLM.Model || model == resolvedModel.Model {
+					globalConfig.LLM = resolvedModel
+				} else {
+					globalConfig.LLM.Model = model
+				}
+			}
+
+			be, beErr := backend.FromConfig(globalConfig, backendFlag)
+			if beErr != nil {
+				return fmt.Errorf("initializing backend: %w", beErr)
+			}
+			fmt.Fprintf(os.Stderr, "[backend] %s\n", be.Name())
+
+			exec := buildExecutor(stack, be)
+			result, err := exec.Apply(context.Background(), resolved, fn, nodeTitle)
+			if err != nil {
+				return fmt.Errorf("applying discuss: %w", err)
+			}
+
+			displayApplyResult(result, fn, nodeTitle)
+			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&root, "root", "", "Root directory")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print rendered prompt without calling LLM")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip cost confirmation")
-	cmd.Flags().StringSliceVar(&includes, "include", nil, "Additional node titles to include as context")
-	cmd.Flags().StringVar(&model, "model", "", "Model name or profile to use (e.g., 'fast', 'powerful', or 'claude-opus-4-6')")
-	cmd.Flags().StringVar(&backendFlag, "backend", "", "Inference backend (codex, claude, anthropic)")
+	cmd.Flags().StringVar(&model, "model", "", "Model name or profile to use")
+	cmd.Flags().StringVar(&backendFlag, "backend", "", "Inference backend")
 	return cmd
-}
-
-func acceptCmd() *cobra.Command {
-	var root string
-	var with string
-	var yes bool
-	var stepsFlag string
-	var backendFlag string
-
-	cmd := &cobra.Command{
-		Use:               "accept <node-title>",
-		Short:             "Accept pending suggestions for a node",
-		Args:              cobra.ExactArgs(1),
-		ValidArgsFunction: completeNodeTitles,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			arg := args[0]
-
-			resolved, err := resolveRoot(root)
-			if err != nil {
-				return fmt.Errorf("resolving root: %w", err)
-			}
-
-			db, err := openDB()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			var sus *engine.Suspension
-			var susSubject string
-
-			if strings.HasPrefix(arg, "suspension:") {
-				// Direct subject ID lookup.
-				sus, err = engine.FindSuspensionBySubject(db, resolved, arg)
-				if err != nil {
-					return fmt.Errorf("finding pending: %w", err)
-				}
-				if sus == nil {
-					return fmt.Errorf("no pending suspension with id %s", arg)
-				}
-				susSubject = arg
-			} else {
-				// Node title: resolve and check for ambiguity.
-				nodeTitle, rerr := resolveNodeTitle(arg)
-				if rerr != nil {
-					return rerr
-				}
-				all, ferr := engine.FindSuspensions(db, resolved, nodeTitle)
-				if ferr != nil {
-					return fmt.Errorf("finding pending: %w", ferr)
-				}
-				if len(all) == 0 {
-					return fmt.Errorf("no pending suggestions for %s", nodeTitle)
-				}
-				if len(all) > 1 {
-					fmt.Fprintf(os.Stderr, "%s multiple pending suspensions for %s — specify an id:\n",
-						ui.Warning.Render("[ambiguous]"), ui.NodeTitle.Render(nodeTitle))
-					for _, s := range all {
-						fmt.Println(ui.FormatPending(orDefault(s.TargetLabel, s.Target), s.Function, s.StepName, s.Summary, s.Subject))
-					}
-					return fmt.Errorf("ambiguous: pass the suspension id (shown above) instead of the node title")
-				}
-				sus = &all[0]
-				susSubject = sus.Subject
-			}
-			nodeTitle := sus.Target
-
-			fn, err := apply.LoadFunction(sus.Function)
-			if err != nil {
-				return fmt.Errorf("loading function: %w", err)
-			}
-
-			if with != "" {
-				steps := fn.EffectiveSteps()
-				stepIndex := sus.StepIndex
-				if stepIndex >= len(steps) {
-					stepIndex = len(steps) - 1
-				}
-				step := steps[stepIndex]
-
-				var streamTo *os.File
-				if step.Output == "text" {
-					streamTo = os.Stderr
-				}
-
-				globalConfig, _ := config.LoadGlobalConfig()
-				resolvedBackend := backendFlag
-				if resolvedBackend == "" {
-					resolvedBackend = sus.Backend
-				}
-				be, beErr := backend.FromConfig(globalConfig, resolvedBackend)
-				if beErr != nil {
-					fmt.Fprintf(os.Stderr, "[warn] backend init: %v, falling back to API\n", beErr)
-				}
-
-				newEntry, llmOutput, err := engine.ReviseStep(engine.ReviseConfig{
-					DB:         db,
-					Root:       resolved,
-					NodeTitle:  nodeTitle,
-					Function:   fn,
-					Suspension: sus,
-					Feedback:   with,
-					Confirm:    !yes,
-					StreamText: streamTo,
-					Backend:    be,
-				})
-				if err != nil {
-					return err
-				}
-				if newEntry == nil {
-					fmt.Fprintf(os.Stderr, "%s Cancelled by user\n", ui.Warning.Render("[abort]"))
-					return nil
-				}
-
-				// Display the result
-				isLastStep := stepIndex == len(steps)-1
-				if isLastStep && step.Output == "ops" {
-					newEntry.Summary = summarizeOutput("ops", llmOutput, newEntry.Ops)
-					printSuggestion(*newEntry)
-				} else if isLastStep {
-					fmt.Fprintln(os.Stderr, ui.FormatStep(sus.Function, step.Name, orDefault(sus.TargetLabel, nodeTitle)))
-					fmt.Println(ui.RenderMarkdownOrPlain(llmOutput))
-				} else {
-					fmt.Fprintln(os.Stderr, ui.FormatStep(fn.Name, step.Name, orDefault(sus.TargetLabel, nodeTitle)))
-					printIntermediateOutput(llmOutput)
-					fmt.Fprintf(os.Stderr, "\nRun `sevens accept %q` to approve and continue.\n", nodeTitle)
-				}
-				// Write a new pending suspension so the user can act on the revised output.
-				revBackendName := ""
-				if be != nil {
-					revBackendName = be.Name()
-				}
-				engine.WriteSuspension(db, resolved, nodeTitle, orDefault(sus.TargetLabel, nodeTitle), resolveSuspensionBlockForCLI(db, resolved, nodeTitle, sus), sus.Function, step.Name, sus.GateType, step.Output, newEntry.RawOutput, stepIndex, newEntry.Summary, newEntry.Ops, revBackendName)
-				engine.ResolveSuspension(db, susSubject, "revised")
-				return nil
-			}
-
-			// No --with: log acceptance and continue pipeline or execute ops.
-			steps := fn.EffectiveSteps()
-
-			nextStep := sus.StepIndex + 1
-			if nextStep < len(steps) {
-				// More pipeline steps — log acceptance and continue.
-				acceptEntry := apply.LogEntry{
-					Event:     "accepted",
-					Root:      resolved,
-					Function:  sus.Function,
-					Target:    nodeTitle,
-					Timestamp: time.Now().UTC().Format(time.RFC3339),
-				}
-				if err := apply.AppendLogDB(db, acceptEntry); err != nil {
-					return fmt.Errorf("appending log: %w", err)
-				}
-				engine.ResolveSuspension(db, susSubject, "accepted")
-				var allowedSteps map[string]bool
-				if stepsFlag != "" {
-					allowedSteps = make(map[string]bool)
-					for _, s := range strings.Split(stepsFlag, ",") {
-						allowedSteps[strings.TrimSpace(s)] = true
-					}
-				}
-				pipelineBackend := backendFlag
-				if pipelineBackend == "" {
-					pipelineBackend = sus.Backend
-				}
-				return runPipeline(resolved, nodeTitle, fn, nextStep, sus.Output, false, !yes, nil, "", allowedSteps, pipelineBackend, sus.BlockPath, sus.BlockID)
-			}
-
-			// Last step was accepted.
-			// If it's not ops output, just log acceptance and done.
-			lastStep := steps[sus.StepIndex]
-			if lastStep.Output != "ops" {
-				acceptEntry := apply.LogEntry{
-					Event:     "accepted",
-					Root:      resolved,
-					Function:  sus.Function,
-					Target:    nodeTitle,
-					Timestamp: time.Now().UTC().Format(time.RFC3339),
-				}
-				if err := apply.AppendLogDB(db, acceptEntry); err != nil {
-					return fmt.Errorf("appending log: %w", err)
-				}
-				engine.ResolveSuspension(db, susSubject, "accepted")
-				fmt.Fprintf(os.Stderr, "%s Acknowledged %s output for %s\n", ui.Success.Render("[accept]"), lastStep.Output, ui.NodeTitle.Render(nodeTitle))
-				return nil
-			}
-
-			// Execute ops FIRST, then log acceptance only on success.
-			created, edited, err := apply.ExecuteOps(sus.Ops, resolved, db)
-			if err != nil {
-				return fmt.Errorf("executing ops: %w", err)
-			}
-
-			// Ops succeeded — now log acceptance.
-			acceptEntry := apply.LogEntry{
-				Event:     "accepted",
-				Root:      resolved,
-				Function:  sus.Function,
-				Target:    nodeTitle,
-				Timestamp: time.Now().UTC().Format(time.RFC3339),
-			}
-			if err := apply.AppendLogDB(db, acceptEntry); err != nil {
-				return fmt.Errorf("appending log: %w", err)
-			}
-			engine.ResolveSuspension(db, susSubject, "accepted")
-
-			commitHash := ""
-			if apply.IsGitRepo(resolved) {
-				allFiles := append(created, edited...)
-				if len(allFiles) > 0 {
-					hash, err := apply.CommitFiles(resolved, fmt.Sprintf("sevens: apply %s to %q", sus.Function, nodeTitle), allFiles)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "%s git commit failed: %v\n", ui.Success.Render("[accept]"), err)
-					} else {
-						commitHash = hash
-					}
-				}
-			}
-
-			appliedEntry := apply.LogEntry{
-				Event:        "applied",
-				Root:         resolved,
-				Function:     sus.Function,
-				Target:       nodeTitle,
-				Timestamp:    time.Now().UTC().Format(time.RFC3339),
-				Commit:       commitHash,
-				FilesCreated: created,
-				FilesEdited:  edited,
-			}
-
-			if err := apply.AppendLogDB(db, appliedEntry); err != nil {
-				return fmt.Errorf("appending log: %w", err)
-			}
-
-			if err := syncRoot(resolved); err != nil {
-				fmt.Fprintf(os.Stderr, "%s re-sync failed: %v\n", ui.Success.Render("[accept]"), err)
-			}
-
-			return nil
-		},
-	}
-
-	cmd.Flags().StringVar(&root, "root", "", "Root directory")
-	cmd.Flags().StringVar(&with, "with", "", "Revision feedback to re-run with")
-	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip cost confirmation")
-	cmd.Flags().StringVar(&stepsFlag, "steps", "", "Comma-separated step names to advance (skips others)")
-	cmd.Flags().StringVar(&backendFlag, "backend", "", "Inference backend override (codex, claude, anthropic)")
-	return cmd
-}
-
-func rejectCmd() *cobra.Command {
-	var root string
-
-	cmd := &cobra.Command{
-		Use:               "reject <node-title>",
-		Short:             "Reject pending suggestions for a node",
-		Args:              cobra.ExactArgs(1),
-		ValidArgsFunction: completeNodeTitles,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			arg := args[0]
-
-			resolved, err := resolveRoot(root)
-			if err != nil {
-				return fmt.Errorf("resolving root: %w", err)
-			}
-			_ = resolved
-
-			db, err := openDB()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			var sus *engine.Suspension
-			var susSubject string
-
-			if strings.HasPrefix(arg, "suspension:") {
-				sus, err = engine.FindSuspensionBySubject(db, resolved, arg)
-				if err != nil {
-					return fmt.Errorf("finding pending: %w", err)
-				}
-				if sus == nil {
-					return fmt.Errorf("no pending suspension with id %s", arg)
-				}
-				susSubject = arg
-			} else {
-				nodeTitle, rerr := resolveNodeTitle(arg)
-				if rerr != nil {
-					return rerr
-				}
-				all, ferr := engine.FindSuspensions(db, resolved, nodeTitle)
-				if ferr != nil {
-					return fmt.Errorf("finding pending: %w", ferr)
-				}
-				if len(all) == 0 {
-					return fmt.Errorf("no pending suggestions for %s", nodeTitle)
-				}
-				if len(all) > 1 {
-					fmt.Fprintf(os.Stderr, "%s multiple pending suspensions for %s — specify an id:\n",
-						ui.Warning.Render("[ambiguous]"), ui.NodeTitle.Render(nodeTitle))
-					for _, s := range all {
-						fmt.Println(ui.FormatPending(orDefault(s.TargetLabel, s.Target), s.Function, s.StepName, s.Summary, s.Subject))
-					}
-					return fmt.Errorf("ambiguous: pass the suspension id (shown above) instead of the node title")
-				}
-				sus = &all[0]
-				susSubject = sus.Subject
-			}
-			nodeTitle := sus.Target
-
-			entry := apply.LogEntry{
-				Event:     "rejected",
-				Root:      resolved,
-				Target:    nodeTitle,
-				Timestamp: time.Now().UTC().Format(time.RFC3339),
-			}
-
-			if err := apply.AppendLogDB(db, entry); err != nil {
-				return fmt.Errorf("appending log: %w", err)
-			}
-
-			engine.ResolveSuspension(db, susSubject, "rejected")
-
-			fmt.Fprintf(os.Stderr, "%s %s\n", ui.Warning.Render("Rejected suggestions for"), ui.NodeTitle.Render(nodeTitle))
-			return nil
-		},
-	}
-
-	cmd.Flags().StringVar(&root, "root", "", "Root directory")
-	return cmd
-}
-
-func pendingCmd() *cobra.Command {
-	var root string
-
-	cmd := &cobra.Command{
-		Use:   "pending",
-		Short: "List nodes with pending suggestions",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			resolved, err := resolveRoot(root)
-			if err != nil {
-				return fmt.Errorf("resolving root: %w", err)
-			}
-
-			db, err := openDB()
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-
-			suspensions, err := engine.ListSuspensions(db, resolved)
-			if err != nil {
-				return fmt.Errorf("listing pending: %w", err)
-			}
-
-			if len(suspensions) == 0 {
-				fmt.Fprintln(os.Stderr, "No pending suggestions")
-				return nil
-			}
-
-			for _, sus := range suspensions {
-				fmt.Println(ui.FormatPending(orDefault(sus.TargetLabel, sus.Target), sus.Function, sus.StepName, sus.Summary, sus.Subject))
-			}
-			return nil
-		},
-	}
-
-	cmd.Flags().StringVar(&root, "root", "", "Root directory")
-	return cmd
-}
-
-func functionsCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "functions",
-		Short: "List available functions",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			functions, err := apply.ListFunctions()
-			if err != nil {
-				return fmt.Errorf("listing functions: %w", err)
-			}
-
-			if len(functions) == 0 {
-				fmt.Fprintln(os.Stderr, "No functions defined")
-				return nil
-			}
-
-			// Find the longest name for alignment.
-			maxLen := 0
-			for _, fn := range functions {
-				if len(fn.Name) > maxLen {
-					maxLen = len(fn.Name)
-				}
-			}
-
-			for _, fn := range functions {
-				padding := strings.Repeat(" ", maxLen-len(fn.Name))
-				fmt.Fprintf(os.Stdout, "%s%s  %s\n", ui.Label.Render(fn.Name), padding, ui.Dim.Render(fn.Description))
-			}
-			return nil
-		},
-	}
 }
 
 func defineCmd() *cobra.Command {
@@ -1751,7 +1076,7 @@ func defineCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 
-			configDir, err := store.ConfigDir()
+			configDir, err := config.ConfigDir()
 			if err != nil {
 				return fmt.Errorf("getting config dir: %w", err)
 			}
@@ -1761,7 +1086,7 @@ func defineCmd() *cobra.Command {
 				return fmt.Errorf("creating functions dir: %w", err)
 			}
 
-			fn := apply.Function{
+			fn := function.EDNFunction{
 				Name:        name,
 				Description: description,
 				Input:       "node",
@@ -2205,16 +1530,12 @@ func revertCmd() *cobra.Command {
 			defer stack.Close()
 
 			// Find the last "applied" log entry with a commit hash
-			// Note: kb.LogEntry doesn't carry Commit/FilesCreated/FilesEdited
-			// yet -- those are richer fields from apply.LogEntry. For now,
-			// fall back to legacy log for revert since it needs those fields.
-			db := stack.Store.DB()
-			entries, err := apply.ReadLogDB(db, resolved, nodeTitle)
+			entries, err := stack.KB.ReadLog(context.Background(), resolved, nodeTitle)
 			if err != nil {
 				return fmt.Errorf("reading log: %w", err)
 			}
 
-			var lastApplied *apply.LogEntry
+			var lastApplied *kb.LogEntry
 			for i := len(entries) - 1; i >= 0; i-- {
 				if entries[i].Event == "applied" && entries[i].Commit != "" {
 					lastApplied = &entries[i]
@@ -2447,14 +1768,13 @@ func submitCmd() *cobra.Command {
 				return err
 			}
 			defer stack.Close()
-			db := stack.Store.DB()
 
 			// Determine step name and index
 			if stepName == "" {
 				stepName = "default"
 			}
 			stepIndex := 0
-			if fn, err := apply.LoadFunction(fnName); err == nil {
+			if fn, _, err := function.LoadFunction(fnName); err == nil {
 				steps := fn.EffectiveSteps()
 				for i, s := range steps {
 					if s.Name == stepName {
@@ -2475,21 +1795,11 @@ func submitCmd() *cobra.Command {
 
 			switch outputType {
 			case "ops":
-				ops, parseErr := apply.ParseOps(responseText)
+				ops, parseErr := function.ParseOps(responseText)
 				if parseErr != nil {
 					return fmt.Errorf("parsing ops response: %w", parseErr)
 				}
-				for _, op := range ops {
-					tfResult.Ops = append(tfResult.Ops, function.FileOp{
-						Action:  op.Action,
-						Title:   op.Title,
-						Parent:  op.Parent,
-						File:    op.File,
-						OldText: op.OldText,
-						NewText: op.NewText,
-						Content: op.Content,
-					})
-				}
+				tfResult.Ops = ops
 
 				// Suspend in Pending phase
 				p.CurrentResult = &tfResult
@@ -2498,15 +1808,16 @@ func submitCmd() *cobra.Command {
 					return fmt.Errorf("saving pipeline: %w", err)
 				}
 
-				// Also log to old system for backwards compat
-				entry := apply.LogEntry{
-					Root: resolved, Function: fnName, Target: nodeTitle,
-					Step: stepName, StepIndex: stepIndex,
+				// Log via new KB system
+				stack.KB.AppendLog(context.Background(), kb.LogEntry{
+					Event:     "suggested",
+					Root:      resolved,
+					Function:  fnName,
+					Node:      nodeTitle,
+					Step:      stepName,
 					Timestamp: time.Now().UTC().Format(time.RFC3339),
-					RawOutput: responseText, Event: "suggested",
-					Ops: ops, Summary: summarizeOutput("ops", responseText, ops),
-				}
-				_ = apply.AppendLogDB(db, entry)
+					Result:    summarizeOutput("ops", responseText, ops),
+				})
 
 				fmt.Fprintf(os.Stderr, "[submit] %s/%s → %q (pipeline %s)\n", fnName, stepName, nodeTitle, p.ID)
 				for _, op := range ops {
@@ -2523,13 +1834,12 @@ func submitCmd() *cobra.Command {
 				}
 
 				summary := summarizeOutput("suggestions", responseText, nil)
-				entry := apply.LogEntry{
-					Root: resolved, Function: fnName, Target: nodeTitle,
-					Step: stepName, StepIndex: stepIndex,
+				stack.KB.AppendLog(context.Background(), kb.LogEntry{
+					Event: "suggested", Root: resolved, Function: fnName,
+					Node: nodeTitle, Step: stepName,
 					Timestamp: time.Now().UTC().Format(time.RFC3339),
-					RawOutput: responseText, Event: "suggested", Summary: summary,
-				}
-				_ = apply.AppendLogDB(db, entry)
+					Result: summary,
+				})
 
 				fmt.Fprintf(os.Stderr, "[submit] %s/%s → %q (%s, pipeline %s)\n", fnName, stepName, nodeTitle, summary, p.ID)
 				fmt.Fprintf(os.Stderr, "\nRun `sevens accept %q` to approve and continue.\n", nodeTitle)
@@ -2542,13 +1852,11 @@ func submitCmd() *cobra.Command {
 					return fmt.Errorf("saving pipeline: %w", err)
 				}
 
-				entry := apply.LogEntry{
-					Root: resolved, Function: fnName, Target: nodeTitle,
-					Step: stepName, StepIndex: stepIndex,
+				stack.KB.AppendLog(context.Background(), kb.LogEntry{
+					Event: "completed", Root: resolved, Function: fnName,
+					Node: nodeTitle, Step: stepName,
 					Timestamp: time.Now().UTC().Format(time.RFC3339),
-					RawOutput: responseText, Event: "completed",
-				}
-				_ = apply.AppendLogDB(db, entry)
+				})
 
 				fmt.Fprintf(os.Stderr, "[submit] %s/%s → %q (completed)\n", fnName, stepName, nodeTitle)
 				fmt.Println(responseText)
@@ -2960,7 +2268,7 @@ func configCmd() *cobra.Command {
 				return fmt.Errorf("no MCP servers defined in capabilities.edn")
 			}
 
-			configDir, err := store.ConfigDir()
+			configDir, err := config.ConfigDir()
 			if err != nil {
 				return fmt.Errorf("config dir: %w", err)
 			}

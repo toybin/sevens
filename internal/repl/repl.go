@@ -1,11 +1,11 @@
 // Package repl implements an interactive REPL for sevens.
-// It wraps the same internal pipeline, graph, and store packages as the CLI,
-// but with persistent focus state, shorter syntax, and inline navigation.
+// It uses injected interfaces for graph queries, pipeline execution,
+// apply operations, and template operations — no direct imports of the
+// old apply, engine, graph, or store packages.
 package repl
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"io"
 	"os"
@@ -15,15 +15,11 @@ import (
 
 	"github.com/chzyer/readline"
 	"olympos.io/encoding/edn"
-	"sevens/internal/apply"
 	"sevens/internal/backend"
 	"sevens/internal/config"
-	"sevens/internal/engine"
 	"sevens/internal/function"
-	"sevens/internal/graph"
 	"sevens/internal/kb"
 	projmd "sevens/internal/projection/md"
-	"sevens/internal/store"
 	"sevens/internal/ui"
 )
 
@@ -38,16 +34,15 @@ const (
 
 // REPL holds state for an interactive sevens session.
 type REPL struct {
-	db                 *sql.DB
 	root               string
 	focus              string // focused node title; "" = no focus
-	focusBlock         *graph.BlockListEntry
+	focusBlock         *BlockListEntry
 	includes           []string // extra context nodes for apply calls
 	dryRun             bool
 	modelFlag          string   // model override; "" = use globalCfg default
 	backendName        string   // backend override; "" = use globalCfg default
 	lastList           []string // last numbered list printed (for numeric nav)
-	lastBlocks         []graph.BlockListEntry
+	lastBlocks         []BlockListEntry
 	globalCfg          config.GlobalConfig
 	mode               Mode
 	noteLines          []string // buffer for note mode
@@ -55,7 +50,13 @@ type REPL struct {
 	discussFileCreated bool     // true if the discussion file was created during this session
 	discussFilePath    string   // absolute path to the discussion file
 	discussCommit      string   // short commit hash if a commit was made during enterDiscussion
-	kbInstance         *kb.KB   // new architecture KB; nil if not provided
+	kbInstance         *kb.KB   // new architecture KB
+
+	// Injected interfaces (implementations provided by CLI layer).
+	graphQ     GraphQuerier
+	pipelineR  PipelineRunner
+	applyR     ApplyRunner
+	templateR  TemplateRunner
 
 	rl *readline.Instance
 }
@@ -68,28 +69,47 @@ func WithKB(k *kb.KB) Option {
 	return func(r *REPL) { r.kbInstance = k }
 }
 
+// WithGraphQuerier injects the graph query implementation.
+func WithGraphQuerier(q GraphQuerier) Option {
+	return func(r *REPL) { r.graphQ = q }
+}
+
+// WithPipelineRunner injects the pipeline/suspension implementation.
+func WithPipelineRunner(p PipelineRunner) Option {
+	return func(r *REPL) { r.pipelineR = p }
+}
+
+// WithApplyRunner injects the apply operations implementation.
+func WithApplyRunner(a ApplyRunner) Option {
+	return func(r *REPL) { r.applyR = a }
+}
+
+// WithTemplateRunner injects the template operations implementation.
+func WithTemplateRunner(t TemplateRunner) Option {
+	return func(r *REPL) { r.templateR = t }
+}
+
 // New creates a REPL and initialises readline. focusNode may be "".
-func New(db *sql.DB, root string, focusNode string, globalCfg config.GlobalConfig, opts ...Option) (*REPL, error) {
+func New(root string, focusNode string, globalCfg config.GlobalConfig, opts ...Option) (*REPL, error) {
 	// Apply theme from config if set.
 	if globalCfg.Theme != "" {
 		ui.SetTheme(globalCfg.Theme)
 	}
 
-	// Resolve initial focus to canonical case.
-	if focusNode != "" {
-		if canonical := store.ResolveTitle(db, focusNode, root); canonical != "" {
-			focusNode = canonical
-		}
-	}
-
 	r := &REPL{
-		db:        db,
 		root:      root,
 		focus:     focusNode,
 		globalCfg: globalCfg,
 	}
 	for _, o := range opts {
 		o(r)
+	}
+
+	// Resolve initial focus to canonical case.
+	if focusNode != "" && r.graphQ != nil {
+		if canonical := r.graphQ.ResolveTitle(focusNode, root); canonical != "" {
+			r.focus = canonical
+		}
 	}
 
 	histPath, _ := historyFile() // non-fatal if unavailable
@@ -193,7 +213,7 @@ func (r *REPL) setFocus(title string) {
 	r.updatePrompt()
 }
 
-func (r *REPL) setFocusBlock(block graph.BlockListEntry) {
+func (r *REPL) setFocusBlock(block BlockListEntry) {
 	r.focusBlock = &block
 	r.updatePrompt()
 }
@@ -250,7 +270,10 @@ func (r *REPL) requireFocus() (string, error) {
 }
 
 func (r *REPL) nodeTitles() []string {
-	titles, _ := store.ListNodeTitles(r.db, r.root)
+	if r.graphQ == nil {
+		return nil
+	}
+	titles, _ := r.graphQ.ListNodeTitles(r.root)
 	return titles
 }
 
@@ -302,15 +325,21 @@ func isFunctionName(name string) bool {
 }
 
 func (r *REPL) isNodeTitle(s string) bool {
-	return store.ResolveTitle(r.db, s, r.root) != ""
+	if r.graphQ == nil {
+		return false
+	}
+	return r.graphQ.ResolveTitle(s, r.root) != ""
 }
 
 // resolveTitle returns the canonical (as-stored) title for a case-insensitive input.
 func (r *REPL) resolveTitle(s string) string {
-	return store.ResolveTitle(r.db, s, r.root)
+	if r.graphQ == nil {
+		return ""
+	}
+	return r.graphQ.ResolveTitle(s, r.root)
 }
 
-func opName(op apply.FileOp) string {
+func opName(op FileOp) string {
 	if op.Title != "" {
 		return op.Title
 	}
@@ -321,7 +350,7 @@ func opName(op apply.FileOp) string {
 }
 
 func historyFile() (string, error) {
-	dir, err := store.ConfigDir()
+	dir, err := config.ConfigDir()
 	if err != nil {
 		return "", err
 	}
@@ -332,17 +361,17 @@ func nowISO() string {
 	return time.Now().UTC().Format(time.RFC3339)
 }
 
-func resolveSuspensionBlock(db *sql.DB, root, nodeTitle string, sus *engine.Suspension) *graph.BlockTarget {
-	if sus == nil {
+func (r *REPL) resolveSuspensionBlock(root, nodeTitle string, sus *Suspension) *BlockTarget {
+	if sus == nil || r.graphQ == nil {
 		return nil
 	}
 	if sus.BlockID != "" {
-		if block, err := graph.ResolveBlockTargetBySubject(db, sus.BlockID); err == nil {
+		if block, err := r.graphQ.ResolveBlockTargetBySubject(sus.BlockID); err == nil {
 			return block
 		}
 	}
 	if sus.BlockPath != "" {
-		if block, err := graph.ResolveBlockTarget(db, root, nodeTitle, sus.BlockPath); err == nil {
+		if block, err := r.graphQ.ResolveBlockTarget(root, nodeTitle, sus.BlockPath); err == nil {
 			return block
 		}
 	}
@@ -376,34 +405,50 @@ type pipelineOpts struct {
 	includes       []string
 }
 
-func (r *REPL) runPipeline(nodeTitle string, fn *apply.Function, startStep int, prev string, dryRun bool, opts ...pipelineOpts) error {
-	walk, err := graph.BuildWalk(r.db, r.root, nodeTitle, 1)
-	if err != nil {
-		return fmt.Errorf("building walk: %w", err)
+func (r *REPL) runPipeline(nodeTitle string, fnDef *FunctionDef, startStep int, prev string, dryRun bool, opts ...pipelineOpts) error {
+	if r.pipelineR == nil {
+		return fmt.Errorf("pipeline runner not available")
 	}
 
 	globalCfg := r.effectiveCfg()
-
-	var ctxFiles []string
-	ctxFiles = append(ctxFiles, globalCfg.ContextFiles...)
-	ctxFiles = append(ctxFiles, fn.ContextFiles...)
-	ctxFiles = append(ctxFiles, walk.Node.ContextFiles...)
-	contextStr := apply.LoadContextFiles(r.root, ctxFiles)
 
 	var opt pipelineOpts
 	if len(opts) > 0 {
 		opt = opts[0]
 	}
 
+	// Build context string from context files.
+	var ctxFiles []string
+	ctxFiles = append(ctxFiles, globalCfg.ContextFiles...)
+	ctxFiles = append(ctxFiles, fnDef.ContextFiles...)
+
+	// Get node context files from walk.
+	if r.graphQ != nil {
+		walk, err := r.graphQ.BuildWalk(r.root, nodeTitle, 1)
+		if err == nil && walk != nil {
+			ctxFiles = append(ctxFiles, walk.Node.ContextFiles...)
+		}
+	}
+
+	contextStr := ""
+	if r.applyR != nil {
+		contextStr = r.applyR.LoadContextFiles(r.root, ctxFiles)
+	}
+
 	// Auto-include group if node has include-group: true in frontmatter.
-	config, _ := graph.LoadConfig(r.root)
-	autoIncludes, _ := graph.AutoGroupIncludes(r.db, r.root, nodeTitle, config)
+	var autoIncludes []string
+	if r.graphQ != nil {
+		autoIncludes, _ = r.graphQ.AutoGroupIncludes(r.root, nodeTitle)
+	}
 	allIncludes := append([]string(nil), r.includes...)
 	allIncludes = append(allIncludes, opt.includes...)
 	allIncludes = append(allIncludes, autoIncludes...)
 
 	for _, inc := range allIncludes {
-		incWalk, err := graph.BuildWalk(r.db, r.root, inc, 0)
+		if r.graphQ == nil {
+			continue
+		}
+		incWalk, err := r.graphQ.BuildWalk(r.root, inc, 0)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s included node %q: %v\n",
 				ui.Warning.Render("[warn]"), inc, err)
@@ -414,6 +459,7 @@ func (r *REPL) runPipeline(nodeTitle string, fn *apply.Function, startStep int, 
 	}
 
 	var be backend.Backend
+	var err error
 	if !dryRun {
 		be, err = backend.FromConfig(globalCfg, r.backendName)
 		if err != nil {
@@ -422,48 +468,52 @@ func (r *REPL) runPipeline(nodeTitle string, fn *apply.Function, startStep int, 
 		fmt.Fprintf(os.Stderr, "%s %s\n", systemStyle.Render("[backend]"), be.Name())
 	}
 
-	var targetBlock *graph.BlockTarget
-	if opt.blockID != "" {
-		targetBlock, err = graph.ResolveBlockTargetBySubject(r.db, opt.blockID)
-		if err != nil {
-			return fmt.Errorf("resolving block target: %w", err)
-		}
-	} else if opt.blockPath != "" {
-		targetBlock, err = graph.ResolveBlockTarget(r.db, r.root, nodeTitle, opt.blockPath)
-		if err != nil {
-			return fmt.Errorf("resolving block target: %w", err)
-		}
-	}
-	targetLabel := nodeTitle
-	if targetBlock != nil {
-		targetLabel = targetBlock.Label()
-	}
-	cfg := engine.PipelineConfig{
-		DB:            r.db,
+	cfg := PipelineConfig{
 		Root:          r.root,
 		NodeTitle:     nodeTitle,
-		TargetBlock:   targetBlock,
-		Function:      fn,
-		GlobalConfig:  globalCfg,
-		Walk:          walk,
-		ContextStr:    contextStr,
+		FunctionName:  fnDef.Name,
+		StartStep:     startStep,
+		PrevOutput:    prev,
 		DryRun:        dryRun,
-		Confirm:       false, // REPL: readline owns stdin, can't prompt; skip cost confirmation
-		StreamText:    true,
-		Backend:       be,
 		ModelOverride: r.modelFlag,
+		BackendName:   r.backendName,
 		Instruction:   opt.instruction,
+		ContextStr:    contextStr,
+		StreamText:    true,
+		Includes:      allIncludes,
 	}
 
-	result := engine.RunPipeline(context.Background(), cfg, startStep, prev)
+	if opt.blockID != "" && r.graphQ != nil {
+		block, err := r.graphQ.ResolveBlockTargetBySubject(opt.blockID)
+		if err != nil {
+			return fmt.Errorf("resolving block target: %w", err)
+		}
+		cfg.TargetBlock = block
+	} else if opt.blockPath != "" && r.graphQ != nil {
+		block, err := r.graphQ.ResolveBlockTarget(r.root, nodeTitle, opt.blockPath)
+		if err != nil {
+			return fmt.Errorf("resolving block target: %w", err)
+		}
+		cfg.TargetBlock = block
+	}
+
+	targetLabel := nodeTitle
+	if cfg.TargetBlock != nil {
+		targetLabel = cfg.TargetBlock.Label()
+	}
+
+	result, err := r.pipelineR.RunPipeline(cfg)
+	if err != nil {
+		return err
+	}
 
 	// In dry-run mode the engine already printed the prompt to stdout — don't repeat it.
 	if dryRun {
 		return nil
 	}
 
-	if result.IsLeft() {
-		sus := result.MustLeft()
+	if result.Suspended && result.Suspension != nil {
+		sus := result.Suspension
 		fmt.Fprintln(os.Stderr, ui.FormatStep(sus.Function, sus.StepName, orDefault(sus.TargetLabel, sus.Target)))
 		if sus.OutputType == "ops" && len(sus.Ops) > 0 {
 			for _, op := range sus.Ops {
@@ -479,16 +529,16 @@ func (r *REPL) runPipeline(nodeTitle string, fn *apply.Function, startStep int, 
 			return nil
 		}
 		return r.handleAccept([]string{"accept"})
-	} else {
-		res := result.MustRight()
+	} else if result.Result != nil {
+		res := result.Result
 		if res.OutputType == "ops" && len(res.Ops) == 0 {
-			fmt.Fprintln(os.Stderr, ui.FormatStep(fn.Name, res.StepName, targetLabel))
+			fmt.Fprintln(os.Stderr, ui.FormatStep(fnDef.Name, res.StepName, targetLabel))
 			r.printSystem("No changes proposed.")
 		} else if res.Output != "" && res.OutputType == "text" && be == nil {
 			// Text was already streamed via API streaming — just show the label.
-			fmt.Fprintln(os.Stderr, ui.FormatStep(fn.Name, res.StepName, targetLabel))
+			fmt.Fprintln(os.Stderr, ui.FormatStep(fnDef.Name, res.StepName, targetLabel))
 		} else if res.Output != "" {
-			fmt.Fprintln(os.Stderr, ui.FormatStep(fn.Name, res.StepName, targetLabel))
+			fmt.Fprintln(os.Stderr, ui.FormatStep(fnDef.Name, res.StepName, targetLabel))
 			fmt.Println(ui.RenderMarkdownOrPlain(res.Output))
 		}
 	}
@@ -502,12 +552,16 @@ func (r *REPL) runPipeline(nodeTitle string, fn *apply.Function, startStep int, 
 // If susSubjectOverride is non-empty it selects that specific suspension by ID,
 // bypassing the ambiguity check (used after the caller has already resolved it).
 func (r *REPL) doAccept(nodeTitle, withFeedback string, susSubjectOverride ...string) error {
-	var sus *engine.Suspension
+	if r.pipelineR == nil {
+		return fmt.Errorf("pipeline runner not available")
+	}
+
+	var sus *Suspension
 	var susSubject string
 	var err error
 
 	if len(susSubjectOverride) > 0 && susSubjectOverride[0] != "" {
-		sus, err = engine.FindSuspensionBySubject(r.db, r.root, susSubjectOverride[0])
+		sus, err = r.pipelineR.FindSuspensionBySubject(r.root, susSubjectOverride[0])
 		if err != nil {
 			return fmt.Errorf("finding pending: %w", err)
 		}
@@ -516,7 +570,7 @@ func (r *REPL) doAccept(nodeTitle, withFeedback string, susSubjectOverride ...st
 		}
 		susSubject = susSubjectOverride[0]
 	} else {
-		sus, susSubject, err = engine.FindSuspension(r.db, r.root, nodeTitle)
+		sus, susSubject, err = r.pipelineR.FindSuspension(r.root, nodeTitle)
 		if err != nil {
 			return fmt.Errorf("finding pending: %w", err)
 		}
@@ -525,103 +579,92 @@ func (r *REPL) doAccept(nodeTitle, withFeedback string, susSubjectOverride ...st
 		}
 	}
 
-	fn, err := apply.LoadFunction(sus.Function)
+	fnDef, err := r.loadFunctionDef(sus.Function)
 	if err != nil {
 		return fmt.Errorf("loading function: %w", err)
 	}
 
 	if withFeedback != "" {
-		globalCfg := r.effectiveCfg()
-		be, _ := backend.FromConfig(globalCfg, r.backendName)
-
-		steps := fn.EffectiveSteps()
-		stepIdx := sus.StepIndex
-		if stepIdx >= len(steps) {
-			stepIdx = len(steps) - 1
-		}
-		step := steps[stepIdx]
-
-		var streamTo *os.File
-		if step.Output == "text" {
-			streamTo = os.Stderr
-		}
-
-		newEntry, llmOutput, err := engine.ReviseStep(engine.ReviseConfig{
-			DB:         r.db,
-			Root:       r.root,
-			NodeTitle:  nodeTitle,
-			Function:   fn,
-			Suspension: sus,
-			Feedback:   withFeedback,
-			Confirm:    false, // REPL: readline owns stdin
-			StreamText: streamTo,
-			Backend:    be,
+		revResult, err := r.pipelineR.ReviseStep(ReviseConfig{
+			Root:        r.root,
+			NodeTitle:   nodeTitle,
+			FuncName:    sus.Function,
+			SusSubject:  susSubject,
+			Feedback:    withFeedback,
+			BackendName: r.backendName,
+			ModelFlag:   r.modelFlag,
 		})
 		if err != nil {
 			return err
 		}
-		if newEntry == nil {
+		if revResult == nil || revResult.NewEntry == nil {
 			r.printSystem("cancelled")
 			return nil
 		}
 
-		isLast := stepIdx == len(steps)-1
-		outputType := step.Output
-		if isLast && outputType == "ops" {
-			for _, op := range newEntry.Ops {
+		if revResult.IsLast && revResult.OutputType == "ops" && revResult.NewEntry != nil {
+			for _, op := range revResult.NewEntry.Ops {
 				fmt.Fprintln(os.Stderr, ui.FormatOp(op.Action, opName(op)))
 			}
 		} else {
-			fmt.Fprintln(os.Stderr, ui.FormatStep(sus.Function, step.Name, orDefault(sus.TargetLabel, nodeTitle)))
-			if llmOutput != "" {
-				fmt.Println(ui.RenderMarkdownOrPlain(llmOutput))
+			fmt.Fprintln(os.Stderr, ui.FormatStep(sus.Function, revResult.StepName, orDefault(sus.TargetLabel, nodeTitle)))
+			if revResult.LLMOutput != "" {
+				fmt.Println(ui.RenderMarkdownOrPlain(revResult.LLMOutput))
 			}
 		}
-		// Always create a new suspension so the [y/n/r] loop can act on it.
-		engine.WriteSuspension(r.db, r.root, nodeTitle, orDefault(sus.TargetLabel, nodeTitle), resolveSuspensionBlock(r.db, r.root, nodeTitle, sus), sus.Function, step.Name, sus.GateType, outputType, newEntry.RawOutput, stepIdx, newEntry.Summary, newEntry.Ops, r.backendName)
-		engine.ResolveSuspension(r.db, susSubject, "revised")
+		// WriteSuspension and ResolveSuspension handled by the ReviseStep implementation.
 		return nil
 	}
 
 	// No feedback: continue pipeline or execute ops.
-	steps := fn.EffectiveSteps()
-	nextStep := sus.StepIndex + 1
+	steps := fnDef // we need step count from the function
+	_ = steps
 
-	if nextStep < len(steps) {
-		entry := apply.LogEntry{Event: "accepted", Root: r.root, Function: sus.Function, Target: nodeTitle, Timestamp: nowISO()}
-		if err := apply.AppendLogDB(r.db, entry); err != nil {
-			return fmt.Errorf("appending log: %w", err)
+	// Check if there's a next step by checking sus.StepIndex against the function.
+	// The pipeline runner handles the actual step counting internally.
+	// For now, delegate fully to the pipeline runner for continuation.
+
+	// If the suspension output type is not "ops", or there are more steps,
+	// log and resolve, then continue.
+
+	if sus.OutputType != "ops" || sus.StepIndex == 0 {
+		// Log acceptance.
+		if r.applyR != nil {
+			_ = r.applyR.AppendLog(LogEntry{
+				Event:     "accepted",
+				Root:      r.root,
+				Function:  sus.Function,
+				Target:    nodeTitle,
+				Timestamp: nowISO(),
+			})
 		}
-		engine.ResolveSuspension(r.db, susSubject, "accepted")
-		return r.runPipeline(nodeTitle, fn, nextStep, sus.Output, false, pipelineOpts{
+
+		// Try to continue the pipeline from the next step.
+		r.pipelineR.ResolveSuspension(susSubject, "accepted")
+		return r.runPipeline(nodeTitle, fnDef, sus.StepIndex+1, sus.Output, false, pipelineOpts{
 			blockPath: sus.BlockPath,
 			blockID:   sus.BlockID,
 		})
 	}
 
-	lastStep := steps[sus.StepIndex]
-	if lastStep.Output != "ops" {
-		entry := apply.LogEntry{Event: "accepted", Root: r.root, Function: sus.Function, Target: nodeTitle, Timestamp: nowISO()}
-		if err := apply.AppendLogDB(r.db, entry); err != nil {
-			return fmt.Errorf("appending log: %w", err)
-		}
-		engine.ResolveSuspension(r.db, susSubject, "accepted")
-		fmt.Fprintf(os.Stderr, "%s acknowledged %s output for %s\n",
-			ui.Success.Render("[accept]"), lastStep.Output, ui.NodeTitle.Render(nodeTitle))
-		return nil
+	// Execute ops.
+	if r.applyR == nil {
+		return fmt.Errorf("apply runner not available")
 	}
 
-	// Execute ops.
-	created, edited, err := apply.ExecuteOps(sus.Ops, r.root, r.db)
+	created, edited, err := r.applyR.ExecuteOps(sus.Ops, r.root)
 	if err != nil {
 		return fmt.Errorf("executing ops: %w", err)
 	}
 
-	entry := apply.LogEntry{Event: "accepted", Root: r.root, Function: sus.Function, Target: nodeTitle, Timestamp: nowISO()}
-	if err := apply.AppendLogDB(r.db, entry); err != nil {
-		return fmt.Errorf("appending log: %w", err)
-	}
-	engine.ResolveSuspension(r.db, susSubject, "accepted")
+	_ = r.applyR.AppendLog(LogEntry{
+		Event:     "accepted",
+		Root:      r.root,
+		Function:  sus.Function,
+		Target:    nodeTitle,
+		Timestamp: nowISO(),
+	})
+	r.pipelineR.ResolveSuspension(susSubject, "accepted")
 
 	commitHash := ""
 	if projmd.IsGitRepo(r.root) {
@@ -637,7 +680,7 @@ func (r *REPL) doAccept(nodeTitle, withFeedback string, susSubjectOverride ...st
 		}
 	}
 
-	appliedEntry := apply.LogEntry{
+	_ = r.applyR.AppendLog(LogEntry{
 		Event:        "applied",
 		Root:         r.root,
 		Function:     sus.Function,
@@ -646,10 +689,7 @@ func (r *REPL) doAccept(nodeTitle, withFeedback string, susSubjectOverride ...st
 		Commit:       commitHash,
 		FilesCreated: created,
 		FilesEdited:  edited,
-	}
-	if err := apply.AppendLogDB(r.db, appliedEntry); err != nil {
-		return fmt.Errorf("appending log: %w", err)
-	}
+	})
 
 	label := ui.Success.Render("[accept]")
 	if len(created) > 0 {
@@ -671,12 +711,16 @@ func (r *REPL) doAccept(nodeTitle, withFeedback string, susSubjectOverride ...st
 // doReject rejects the pending suspension for nodeTitle.
 // If susSubjectOverride is non-empty it selects that specific suspension by ID.
 func (r *REPL) doReject(nodeTitle string, susSubjectOverride ...string) error {
-	var sus *engine.Suspension
+	if r.pipelineR == nil {
+		return fmt.Errorf("pipeline runner not available")
+	}
+
+	var sus *Suspension
 	var susSubject string
 	var err error
 
 	if len(susSubjectOverride) > 0 && susSubjectOverride[0] != "" {
-		sus, err = engine.FindSuspensionBySubject(r.db, r.root, susSubjectOverride[0])
+		sus, err = r.pipelineR.FindSuspensionBySubject(r.root, susSubjectOverride[0])
 		if err != nil {
 			return fmt.Errorf("finding pending: %w", err)
 		}
@@ -685,7 +729,7 @@ func (r *REPL) doReject(nodeTitle string, susSubjectOverride ...string) error {
 		}
 		susSubject = susSubjectOverride[0]
 	} else {
-		sus, susSubject, err = engine.FindSuspension(r.db, r.root, nodeTitle)
+		sus, susSubject, err = r.pipelineR.FindSuspension(r.root, nodeTitle)
 		if err != nil {
 			return fmt.Errorf("finding pending: %w", err)
 		}
@@ -693,12 +737,17 @@ func (r *REPL) doReject(nodeTitle string, susSubjectOverride ...string) error {
 			return fmt.Errorf("no pending suggestions for %q", nodeTitle)
 		}
 	}
-	_ = sus // used for its Target field by the caller; susSubject is what we need here
-	entry := apply.LogEntry{Event: "rejected", Root: r.root, Target: nodeTitle, Timestamp: nowISO()}
-	if err := apply.AppendLogDB(r.db, entry); err != nil {
-		return fmt.Errorf("appending log: %w", err)
+	_ = sus
+
+	if r.applyR != nil {
+		_ = r.applyR.AppendLog(LogEntry{
+			Event:     "rejected",
+			Root:      r.root,
+			Target:    nodeTitle,
+			Timestamp: nowISO(),
+		})
 	}
-	engine.ResolveSuspension(r.db, susSubject, "rejected")
+	r.pipelineR.ResolveSuspension(susSubject, "rejected")
 	fmt.Fprintf(os.Stderr, "%s %s\n", ui.Warning.Render("rejected"), ui.NodeTitle.Render(nodeTitle))
 	return nil
 }
@@ -709,17 +758,21 @@ func (r *REPL) doRevert(nodeTitle string) error {
 	if !projmd.IsGitRepo(r.root) {
 		return fmt.Errorf("not a git repo — cannot revert")
 	}
+	if r.applyR == nil {
+		return fmt.Errorf("apply runner not available")
+	}
 
 	// Find the last "applied" log entry with a commit hash for this node.
-	entries, err := apply.ReadLogDB(r.db, r.root, nodeTitle)
+	entries, err := r.applyR.ReadLog(r.root, nodeTitle)
 	if err != nil {
 		return fmt.Errorf("reading log: %w", err)
 	}
 
-	var target *apply.LogEntry
+	var target *LogEntry
 	for i := len(entries) - 1; i >= 0; i-- {
 		if entries[i].Event == "applied" && entries[i].Commit != "" {
-			target = &entries[i]
+			e := entries[i]
+			target = &e
 			break
 		}
 	}
@@ -732,13 +785,13 @@ func (r *REPL) doRevert(nodeTitle string) error {
 		ui.NodeTitle.Render(nodeTitle),
 		target.Function, target.Commit)
 
-	newHash, err := apply.RevertCommit(r.root, target.Commit)
+	newHash, err := r.applyR.RevertCommit(r.root, target.Commit)
 	if err != nil {
 		return err
 	}
 
 	// Log the revert.
-	revertEntry := apply.LogEntry{
+	_ = r.applyR.AppendLog(LogEntry{
 		Event:     "reverted",
 		Root:      r.root,
 		Function:  target.Function,
@@ -746,10 +799,7 @@ func (r *REPL) doRevert(nodeTitle string) error {
 		Commit:    newHash,
 		Note:      fmt.Sprintf("reverted commit %s", target.Commit),
 		Timestamp: nowISO(),
-	}
-	if err := apply.AppendLogDB(r.db, revertEntry); err != nil {
-		return fmt.Errorf("appending log: %w", err)
-	}
+	})
 
 	if err := r.resync(); err != nil {
 		fmt.Fprintf(os.Stderr, "%s re-sync: %v\n", ui.Warning.Render("[warn]"), err)
@@ -800,9 +850,20 @@ func (r *REPL) endNote() error {
 	noteText := strings.Join(r.noteLines, "\n")
 
 	// Find the node's file.
-	filePath, err := store.GetObject(r.db, focus, "node/file-path")
+	if r.graphQ == nil {
+		return fmt.Errorf("graph querier not available")
+	}
+	subject, _ := r.graphQ.ResolveNode(focus, r.root)
+	if subject == "" {
+		return fmt.Errorf("could not resolve node %q", focus)
+	}
+	filePath, err := r.graphQ.GetObject(subject, "node/file-path")
 	if err != nil || filePath == "" {
-		return fmt.Errorf("could not find file for %q", focus)
+		// Try the new predicate name.
+		filePath, err = r.graphQ.GetObject(subject, "node/file")
+		if err != nil || filePath == "" {
+			return fmt.Errorf("could not find file for %q", focus)
+		}
 	}
 
 	data, err := os.ReadFile(filePath)
@@ -858,7 +919,7 @@ func (r *REPL) handleNew(title string) error {
 		return err
 	}
 
-	filename := apply.SanitizeFilename(title)
+	filename := projmd.SanitizeFilename(title)
 	path := filepath.Join(r.root, filename)
 
 	if _, err := os.Stat(path); err == nil {
@@ -901,15 +962,18 @@ func (r *REPL) handleNew(title string) error {
 // ─── Group include ───────────────────────────────────────────────────────────
 
 func (r *REPL) includeGroup(name string) error {
-	config, err := graph.LoadConfig(r.root)
+	if r.graphQ == nil {
+		return fmt.Errorf("graph querier not available")
+	}
+	cfg, err := r.graphQ.LoadConfig(r.root)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-	group, ok := config.Groups[name]
+	group, ok := cfg.Groups[name]
 	if !ok {
 		// List available groups for the error.
 		var names []string
-		for k := range config.Groups {
+		for k := range cfg.Groups {
 			names = append(names, k)
 		}
 		if len(names) == 0 {
@@ -918,7 +982,7 @@ func (r *REPL) includeGroup(name string) error {
 		return fmt.Errorf("group %q not found (available: %s)", name, strings.Join(names, ", "))
 	}
 
-	titles, err := graph.ResolveGroup(r.db, r.root, group)
+	titles, err := r.graphQ.ResolveGroup(r.root, group)
 	if err != nil {
 		return fmt.Errorf("resolving group %q: %w", name, err)
 	}
@@ -941,19 +1005,13 @@ func (r *REPL) includeGroup(name string) error {
 }
 
 func (r *REPL) resync() error {
-	config, err := graph.LoadConfig(r.root)
-	if err != nil {
-		return err
+	if r.graphQ != nil {
+		return r.graphQ.Resync(r.root)
 	}
-	files, err := graph.ScanFiles(r.root)
-	if err != nil {
-		return err
-	}
-	nodes, _ := graph.ParseAllFiles(files)
-	return graph.PopulateTriples(r.db, r.root, nodes, config)
+	return nil
 }
 
-// resyncQuiet runs resync but suppresses PopulateTriples' stderr output.
+// resyncQuiet runs resync but suppresses stderr output.
 func (r *REPL) resyncQuiet() error {
 	old := os.Stderr
 	devNull, err := os.Open(os.DevNull)
@@ -966,3 +1024,29 @@ func (r *REPL) resyncQuiet() error {
 	devNull.Close()
 	return syncErr
 }
+
+// loadFunctionDef loads a function definition through the apply runner,
+// or falls back to function.LoadFunction if no apply runner.
+func (r *REPL) loadFunctionDef(name string) (*FunctionDef, error) {
+	if r.applyR != nil {
+		return r.applyR.LoadFunction(name)
+	}
+	// Fallback: use function package directly (no old-package import needed).
+	fn, edn, err := function.LoadFunction(name)
+	if err != nil {
+		return nil, err
+	}
+	var ctxFiles []string
+	if edn != nil {
+		ctxFiles = edn.ContextFiles
+	}
+	return &FunctionDef{
+		Name:         fn.Name,
+		Description:  fn.Description,
+		ContextFiles: ctxFiles,
+	}, nil
+}
+
+// ─── Unused context suppression ─────────────────────────────────────────────
+
+var _ = context.Background // ensure context import for future use

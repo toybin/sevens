@@ -1,27 +1,12 @@
 package repl
 
 import (
-	"database/sql"
+	"fmt"
 	"reflect"
 	"testing"
 
-	_ "turso.tech/database/tursogo"
-
-	"sevens/internal/store"
+	"sevens/internal/kb"
 )
-
-func testREPLDB(t *testing.T) *sql.DB {
-	t.Helper()
-	db, err := sql.Open("turso", ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.InitTriplesSchema(db); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
-}
 
 // ─── tokenize ─────────────────────────────────────────────────────────────────
 
@@ -711,25 +696,90 @@ func TestParseTemplateInvokeArgs(t *testing.T) {
 	}
 }
 
+// testGraphQuerier is a minimal GraphQuerier for tests.
+type testGraphQuerier struct {
+	titles map[string]string // title -> subject
+	objs   map[string]map[string]string // subject -> predicate -> object
+}
+
+func (q *testGraphQuerier) ResolveTitle(title, root string) string {
+	for t := range q.titles {
+		if t == title {
+			return t
+		}
+	}
+	return ""
+}
+func (q *testGraphQuerier) ResolveNode(title, root string) (string, string) {
+	return q.titles[title], ""
+}
+func (q *testGraphQuerier) GetObject(subject, predicate string) (string, error) {
+	if m, ok := q.objs[subject]; ok {
+		return m[predicate], nil
+	}
+	return "", nil
+}
+func (q *testGraphQuerier) NodeTitle(subject string) (string, error) {
+	for t, s := range q.titles {
+		if s == subject {
+			return t, nil
+		}
+	}
+	return "", nil
+}
+func (q *testGraphQuerier) ListNodeTitles(root string) ([]string, error) { return nil, nil }
+func (q *testGraphQuerier) SearchTitles(query, root string) ([]string, error) { return nil, nil }
+func (q *testGraphQuerier) SearchContent(query, root string) ([]string, error) { return nil, nil }
+func (q *testGraphQuerier) BuildWalk(root, title string, depth int) (*WalkOutput, error) {
+	subj := q.titles[title]
+	if subj == "" {
+		return nil, fmt.Errorf("node not found: %q", title)
+	}
+	var parent *string
+	if p, ok := q.objs[subj]["node/parent"]; ok {
+		// Find parent title.
+		for t, s := range q.titles {
+			if s == p {
+				parent = &t
+				break
+			}
+		}
+	}
+	return &WalkOutput{Node: WalkNode{Subject: subj, Title: title, Parent: parent}}, nil
+}
+func (q *testGraphQuerier) BuildOverview(root string) (*OverviewOutput, error) { return nil, nil }
+func (q *testGraphQuerier) BuildBlockList(root, nodeTitle string) (BlockListOutput, error) { return BlockListOutput{}, nil }
+func (q *testGraphQuerier) BuildBlockDiff(root, nodeTitle string) (BlockDiffOutput, error) { return BlockDiffOutput{}, nil }
+func (q *testGraphQuerier) BuildInboxOverview(root, nodeTitle string) (InboxOverview, error) { return InboxOverview{}, nil }
+func (q *testGraphQuerier) PrepareBlockExtraction(root, sourceTitle, blockPath, newTitle, parentTitle string) (ExtractedNode, error) { return ExtractedNode{}, nil }
+func (q *testGraphQuerier) ResolveBlockTarget(root, nodeTitle, blockPath string) (*BlockTarget, error) { return nil, nil }
+func (q *testGraphQuerier) ResolveBlockTargetBySubject(subject string) (*BlockTarget, error) { return nil, nil }
+func (q *testGraphQuerier) LoadConfig(root string) (GraphConfig, error) { return GraphConfig{}, nil }
+func (q *testGraphQuerier) AutoGroupIncludes(root, nodeTitle string) ([]string, error) { return nil, nil }
+func (q *testGraphQuerier) ResolveGroup(root string, group GraphGroup) ([]string, error) { return nil, nil }
+func (q *testGraphQuerier) Resync(root string) error { return nil }
+func (q *testGraphQuerier) ScopeString(scope []string) string { return "" }
+func (q *testGraphQuerier) RenderBlockMarkdown(block BlockListEntry) string { return block.Text }
+
 func TestHandleNavUpMovesToParent(t *testing.T) {
-	db := testREPLDB(t)
 	root := t.TempDir()
 
-	parentSubj := store.NodeSubject(root, "Parent")
-	childSubj := store.NodeSubject(root, "Child")
-	if err := store.InsertTriples(db, []store.Triple{
-		{Subject: parentSubj, Predicate: "node/title", Object: "Parent"},
-		{Subject: parentSubj, Predicate: "node/root", Object: root},
-		{Subject: parentSubj, Predicate: "node/content", Object: "parent body"},
-		{Subject: childSubj, Predicate: "node/title", Object: "Child"},
-		{Subject: childSubj, Predicate: "node/root", Object: root},
-		{Subject: childSubj, Predicate: "node/content", Object: "child body"},
-		{Subject: childSubj, Predicate: "node/parent", Object: parentSubj},
-	}); err != nil {
-		t.Fatal(err)
+	parentSubj := kb.NodeSubject(root, "Parent")
+	childSubj := kb.NodeSubject(root, "Child")
+
+	q := &testGraphQuerier{
+		titles: map[string]string{
+			"Parent": parentSubj,
+			"Child":  childSubj,
+		},
+		objs: map[string]map[string]string{
+			childSubj: {
+				"node/parent": parentSubj,
+			},
+		},
 	}
 
-	r := &REPL{db: db, root: root, focus: "Child"}
+	r := &REPL{root: root, focus: "Child", graphQ: q}
 	if err := r.handleNavUp(); err != nil {
 		t.Fatalf("handleNavUp() error = %v", err)
 	}

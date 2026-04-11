@@ -3,22 +3,27 @@ package repl
 import (
 	"testing"
 
-	"sevens/internal/store"
+	"sevens/internal/kb"
 )
 
 func TestResolveDiscussionFilePath_UsesResolvedSubject(t *testing.T) {
-	db := testREPLDB(t)
 	root := "/tmp/root"
-	subject := store.NodeSubject(root, "Discussion - Parent")
-	if err := store.InsertTriples(db, []store.Triple{
-		{Subject: subject, Predicate: "node/root", Object: root},
-		{Subject: subject, Predicate: "node/title", Object: "Discussion - Parent"},
-		{Subject: subject, Predicate: "node/file-path", Object: "/tmp/root/discussion - parent.md"},
-	}); err != nil {
-		t.Fatalf("insert triples: %v", err)
+	subject := kb.NodeSubject(root, "Discussion - Parent")
+
+	q := &testGraphQuerier{
+		titles: map[string]string{
+			"Discussion - Parent": subject,
+		},
+		objs: map[string]map[string]string{
+			subject: {
+				"node/file-path": "/tmp/root/discussion - parent.md",
+			},
+		},
 	}
 
-	got, err := resolveDiscussionFilePath(db, root, "Discussion - Parent")
+	r := &REPL{root: root, graphQ: q}
+
+	got, err := r.resolveDiscussionFilePath(root, "Discussion - Parent")
 	if err != nil {
 		t.Fatalf("resolveDiscussionFilePath returned error: %v", err)
 	}

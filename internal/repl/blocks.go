@@ -5,8 +5,6 @@ import (
 	"os"
 	"strings"
 
-	"sevens/internal/apply"
-	"sevens/internal/graph"
 	projmd "sevens/internal/projection/md"
 	"sevens/internal/ui"
 )
@@ -37,7 +35,10 @@ func (r *REPL) handleBlocks(tokens []string) error {
 		nodeTitle = canonical
 	}
 
-	output, err := graph.BuildBlockList(r.db, r.root, nodeTitle)
+	if r.graphQ == nil {
+		return fmt.Errorf("graph querier not available")
+	}
+	output, err := r.graphQ.BuildBlockList(r.root, nodeTitle)
 	if err != nil {
 		return err
 	}
@@ -59,7 +60,7 @@ func (r *REPL) handleBlocks(tokens []string) error {
 	}
 	width := len(fmt.Sprintf("%d", len(output.Blocks)))
 	r.lastList = nil
-	r.lastBlocks = append([]graph.BlockListEntry(nil), output.Blocks...)
+	r.lastBlocks = append([]BlockListEntry(nil), output.Blocks...)
 	for i, block := range output.Blocks {
 		num := fmt.Sprintf("%*d.", width, i+1)
 		label := block.Kind
@@ -75,7 +76,7 @@ func (r *REPL) handleBlocks(tokens []string) error {
 			ui.Dim.Render(block.Path)+" "+summarizeBlockText(block.Text, 88),
 		)
 		if len(block.Scope) > 0 {
-			fmt.Printf("      %s %s\n", ui.Dim.Render("scope:"), ui.Dim.Render(graph.ScopeString(block.Scope)))
+			fmt.Printf("      %s %s\n", ui.Dim.Render("scope:"), ui.Dim.Render(scopeString(block.Scope)))
 		}
 	}
 	fmt.Println()
@@ -103,7 +104,10 @@ func (r *REPL) handleBlockDiff(tokens []string) error {
 		nodeTitle = canonical
 	}
 
-	output, err := graph.BuildBlockDiff(r.db, r.root, nodeTitle)
+	if r.graphQ == nil {
+		return fmt.Errorf("graph querier not available")
+	}
+	output, err := r.graphQ.BuildBlockDiff(r.root, nodeTitle)
 	if err != nil {
 		return err
 	}
@@ -127,7 +131,10 @@ func (r *REPL) handleInbox(tokens []string) error {
 	if nodeTitle == "" {
 		nodeTitle = "inbox"
 	}
-	output, err := graph.BuildInboxOverview(r.db, r.root, nodeTitle)
+	if r.graphQ == nil {
+		return fmt.Errorf("graph querier not available")
+	}
+	output, err := r.graphQ.BuildInboxOverview(r.root, nodeTitle)
 	if err != nil {
 		return err
 	}
@@ -193,18 +200,24 @@ func (r *REPL) handleExtractBlock(tokens []string) error {
 		return err
 	}
 
-	extracted, err := graph.PrepareBlockExtraction(r.db, r.root, sourceTitle, blockPath, title, parent)
+	if r.graphQ == nil {
+		return fmt.Errorf("graph querier not available")
+	}
+	extracted, err := r.graphQ.PrepareBlockExtraction(r.root, sourceTitle, blockPath, title, parent)
 	if err != nil {
 		return err
 	}
 
-	ops := []apply.FileOp{{
+	if r.applyR == nil {
+		return fmt.Errorf("apply runner not available")
+	}
+	ops := []FileOp{{
 		Action:  "create",
 		Title:   extracted.Title,
 		Parent:  extracted.ParentTitle,
 		Content: extracted.Content,
 	}}
-	created, _, err := apply.ExecuteOps(ops, r.root, r.db)
+	created, _, err := r.applyR.ExecuteOps(ops, r.root)
 	if err != nil {
 		return fmt.Errorf("creating node: %w", err)
 	}
@@ -339,13 +352,13 @@ func inboxArgs(tokens []string) (root string, ednOutput bool, nodeTitle string, 
 	return root, ednOutput, strings.Join(args, " "), nil
 }
 
-func printREPLBlockDiff(output graph.BlockDiffOutput, showUnchanged bool) {
+func printREPLBlockDiff(output BlockDiffOutput, showUnchanged bool) {
 	fmt.Println()
 	fmt.Println(ui.NodeTitle.Render(output.NodeTitle))
 	fmt.Println(ui.Dim.Render(output.FilePath))
 	fmt.Println(ui.Separator.Render(strings.Repeat("─", 60)))
 
-	printGroup := func(label string, entries []graph.BlockDiffEntry) {
+	printGroup := func(label string, entries []BlockDiffEntry) {
 		if len(entries) == 0 {
 			return
 		}
@@ -360,8 +373,8 @@ func printREPLBlockDiff(output graph.BlockDiffOutput, showUnchanged bool) {
 			if entry.OldPath != "" && entry.NewPath != "" && entry.OldPath != entry.NewPath {
 				fmt.Printf("    %s %s -> %s\n", ui.Dim.Render("path:"), entry.OldPath, entry.NewPath)
 			}
-			oldScope := graph.ScopeString(entry.OldScope)
-			newScope := graph.ScopeString(entry.NewScope)
+			oldScope := scopeString(entry.OldScope)
+			newScope := scopeString(entry.NewScope)
 			if oldScope != "" || newScope != "" {
 				if oldScope == newScope || newScope == "" {
 					fmt.Printf("    %s %s\n", ui.Dim.Render("scope:"), orDefault(oldScope, newScope))
@@ -391,6 +404,10 @@ func printREPLBlockDiff(output graph.BlockDiffOutput, showUnchanged bool) {
 		fmt.Println(ui.Dim.Render("No block changes"))
 		fmt.Println()
 	}
+}
+
+func scopeString(scope []string) string {
+	return strings.Join(scope, " > ")
 }
 
 func summarizeBlockText(text string, max int) string {

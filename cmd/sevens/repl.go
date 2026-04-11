@@ -1,13 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/spf13/cobra"
-	"sevens/internal/apply"
 	"sevens/internal/config"
 	"sevens/internal/repl"
 )
@@ -31,7 +31,6 @@ func replCmd() *cobra.Command {
 				return err
 			}
 			defer stack.Close()
-			db := stack.Store.DB()
 
 			// Ensure DB is closed on SIGINT/SIGTERM so the lock is released.
 			sigCh := make(chan os.Signal, 1)
@@ -53,13 +52,13 @@ func replCmd() *cobra.Command {
 			if len(args) > 0 {
 				focusNode = args[0]
 			} else {
-				session, _ := apply.LoadSession()
+				session, _ := stack.KB.LoadCurrentSession(context.Background())
 				if session != nil && session.Root == resolved {
-					focusNode = session.NodeTitle
+					focusNode = session.Focus
 				}
 			}
 
-			r, err := repl.New(db, resolved, focusNode, globalCfg, repl.WithKB(stack.KB))
+			r, err := repl.New(resolved, focusNode, globalCfg, repl.WithKB(stack.KB))
 			if err != nil {
 				return fmt.Errorf("starting repl: %w", err)
 			}

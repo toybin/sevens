@@ -7,10 +7,6 @@ import (
 	"strings"
 	"unicode"
 
-	"sevens/internal/apply"
-	"sevens/internal/engine"
-	"sevens/internal/graph"
-	"sevens/internal/store"
 	"sevens/internal/ui"
 )
 
@@ -405,7 +401,10 @@ func shouldAutoSync(tokens []string) bool {
 }
 
 func (r *REPL) printFunctions() error {
-	fns, err := apply.ListFunctions()
+	if r.applyR == nil {
+		return fmt.Errorf("apply runner not available")
+	}
+	fns, err := r.applyR.ListFunctions()
 	if err != nil {
 		return fmt.Errorf("listing functions: %w", err)
 	}
@@ -424,8 +423,7 @@ func (r *REPL) printFunctions() error {
 		pad := strings.Repeat(" ", maxLen-len(f.Name))
 		fmt.Printf("  %s%s  %s\n",
 			ui.Label.Render(f.Name), pad,
-			ui.Dim.Render(f.Description),
-		)
+			ui.Dim.Render(f.Description))
 	}
 	fmt.Println()
 	return nil
@@ -438,17 +436,20 @@ func (r *REPL) handleNavUp() error {
 		r.printSystem("already at root")
 		return nil
 	}
-	subject, _ := store.ResolveNode(r.db, r.focus, r.root)
+	if r.graphQ == nil {
+		return fmt.Errorf("graph querier not available")
+	}
+	subject, _ := r.graphQ.ResolveNode(r.focus, r.root)
 	if subject == "" {
 		return fmt.Errorf("could not resolve focused node %q", r.focus)
 	}
-	parentSubject, err := store.GetObject(r.db, subject, "node/parent")
+	parentSubject, err := r.graphQ.GetObject(subject, "node/parent")
 	if err != nil || parentSubject == "" {
 		r.setFocus("")
 		r.printSystem("at root — unfocused")
 		return nil
 	}
-	parentTitle, err := store.NodeTitle(r.db, parentSubject)
+	parentTitle, err := r.graphQ.NodeTitle(parentSubject)
 	if err != nil {
 		return fmt.Errorf("resolving parent title: %w", err)
 	}
@@ -481,8 +482,11 @@ func (r *REPL) handleRelativeNav(rel, indexStr string) error {
 		return fmt.Errorf("expected a positive number, got %q", indexStr)
 	}
 
+	if r.graphQ == nil {
+		return fmt.Errorf("graph querier not available")
+	}
 	var titles []string
-	walk, werr := graph.BuildWalk(r.db, r.root, focus, 1)
+	walk, werr := r.graphQ.BuildWalk(r.root, focus, 1)
 	if werr != nil {
 		return werr
 	}
@@ -529,19 +533,27 @@ func (r *REPL) showFocusedBlock() error {
 	fmt.Println()
 	fmt.Printf("%s  %s\n", ui.Label.Render(block.Path), ui.Dim.Render(block.Kind))
 	if len(block.Scope) > 0 {
-		fmt.Printf("  %s %s\n", ui.Dim.Render("scope:"), ui.Dim.Render(graph.ScopeString(block.Scope)))
+		scopeStr := strings.Join(block.Scope, " > ")
+		fmt.Printf("  %s %s\n", ui.Dim.Render("scope:"), ui.Dim.Render(scopeStr))
 	}
 	if block.Signifier != "" {
 		fmt.Printf("  %s %s\n", ui.Dim.Render("signifier:"), ui.Dim.Render(block.Signifier))
 	}
 	fmt.Println(ui.Separator.Render(strings.Repeat("─", 60)))
-	fmt.Println(ui.RenderMarkdownOrPlain(graph.RenderBlockMarkdown(block)))
+	blockMd := block.Text
+	if r.graphQ != nil {
+		blockMd = r.graphQ.RenderBlockMarkdown(block)
+	}
+	fmt.Println(ui.RenderMarkdownOrPlain(blockMd))
 	return nil
 }
 
 // showFocusSummary prints a one-line summary when focus changes.
 func (r *REPL) showFocusSummary() error {
-	walk, err := graph.BuildWalk(r.db, r.root, r.focus, 1)
+	if r.graphQ == nil {
+		return nil
+	}
+	walk, err := r.graphQ.BuildWalk(r.root, r.focus, 1)
 	if err != nil {
 		return fmt.Errorf("building walk: %w", err)
 	}
@@ -580,7 +592,10 @@ func (r *REPL) handleWalk(tokens []string) error {
 		}
 	}
 
-	walk, err := graph.BuildWalk(r.db, r.root, nodeTitle, 1)
+	if r.graphQ == nil {
+		return fmt.Errorf("graph querier not available")
+	}
+	walk, err := r.graphQ.BuildWalk(r.root, nodeTitle, 1)
 	if err != nil {
 		return fmt.Errorf("building walk: %w", err)
 	}
@@ -600,7 +615,10 @@ func (r *REPL) handleChildren() error {
 	if err != nil {
 		return err
 	}
-	walk, err := graph.BuildWalk(r.db, r.root, focus, 1)
+	if r.graphQ == nil {
+		return fmt.Errorf("graph querier not available")
+	}
+	walk, err := r.graphQ.BuildWalk(r.root, focus, 1)
 	if err != nil {
 		return fmt.Errorf("building walk: %w", err)
 	}
@@ -615,7 +633,10 @@ func (r *REPL) handleSiblings() error {
 	if err != nil {
 		return err
 	}
-	walk, err := graph.BuildWalk(r.db, r.root, focus, 1)
+	if r.graphQ == nil {
+		return fmt.Errorf("graph querier not available")
+	}
+	walk, err := r.graphQ.BuildWalk(r.root, focus, 1)
 	if err != nil {
 		return fmt.Errorf("building walk: %w", err)
 	}
@@ -630,11 +651,14 @@ func (r *REPL) handleSiblings() error {
 }
 
 func (r *REPL) handleSearch(query string) error {
-	titles, err := store.SearchTitles(r.db, query, r.root)
+	if r.graphQ == nil {
+		return fmt.Errorf("graph querier not available")
+	}
+	titles, err := r.graphQ.SearchTitles(query, r.root)
 	if err != nil {
 		return fmt.Errorf("searching titles: %w", err)
 	}
-	content, err := store.SearchContent(r.db, query, r.root)
+	content, err := r.graphQ.SearchContent(query, r.root)
 	if err != nil {
 		return fmt.Errorf("searching content: %w", err)
 	}
@@ -686,7 +710,10 @@ func countIn(sub, set []string) int {
 }
 
 func (r *REPL) handlePending() error {
-	suspensions, err := engine.ListSuspensions(r.db, r.root)
+	if r.pipelineR == nil {
+		return fmt.Errorf("pipeline runner not available")
+	}
+	suspensions, err := r.pipelineR.ListSuspensions(r.root)
 	if err != nil {
 		return fmt.Errorf("listing pending: %w", err)
 	}
@@ -718,7 +745,10 @@ func (r *REPL) handleLog(tokens []string) error {
 		}
 	}
 
-	entries, err := apply.ReadLogDB(r.db, r.root, nodeTitle)
+	if r.applyR == nil {
+		return fmt.Errorf("apply runner not available")
+	}
+	entries, err := r.applyR.ReadLog(r.root, nodeTitle)
 	if err != nil {
 		return fmt.Errorf("reading log: %w", err)
 	}
@@ -744,11 +774,10 @@ func (r *REPL) handleLog(tokens []string) error {
 }
 
 func (r *REPL) handleOverview() error {
-	config, err := graph.LoadConfig(r.root)
-	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+	if r.graphQ == nil {
+		return fmt.Errorf("graph querier not available")
 	}
-	output, err := graph.BuildOverview(r.db, r.root, config)
+	output, err := r.graphQ.BuildOverview(r.root)
 	if err != nil {
 		return fmt.Errorf("building overview: %w", err)
 	}
@@ -768,7 +797,7 @@ func (r *REPL) handleApply(tokens []string) error {
 	fnName := tokens[0]
 	flags := parseInlineFlags(tokens[1:])
 
-	fn, err := apply.LoadFunction(fnName)
+	fn, err := r.loadFunctionDef(fnName)
 	if err != nil {
 		return fmt.Errorf("loading function %q: %w", fnName, err)
 	}
@@ -813,8 +842,11 @@ func (r *REPL) handleAccept(tokens []string) error {
 
 	var susSubject string
 	if susSubjectArg != "" {
+		if r.pipelineR == nil {
+			return fmt.Errorf("pipeline runner not available")
+		}
 		// Validate the subject ID.
-		sus, serr := engine.FindSuspensionBySubject(r.db, r.root, susSubjectArg)
+		sus, serr := r.pipelineR.FindSuspensionBySubject(r.root, susSubjectArg)
 		if serr != nil {
 			return fmt.Errorf("finding pending: %w", serr)
 		}
@@ -896,7 +928,10 @@ func (r *REPL) handleReject() error {
 // resolveSuspensionSubject returns the single pending suspension subject for the
 // given node title, or errors with a list of choices when there is more than one.
 func (r *REPL) resolveSuspensionSubject(nodeTitle string) (string, error) {
-	all, err := engine.FindSuspensions(r.db, r.root, nodeTitle)
+	if r.pipelineR == nil {
+		return "", fmt.Errorf("pipeline runner not available")
+	}
+	all, err := r.pipelineR.FindSuspensions(r.root, nodeTitle)
 	if err != nil {
 		return "", fmt.Errorf("finding pending: %w", err)
 	}
@@ -994,7 +1029,7 @@ func parseInlineFlags(tokens []string) inlineFlags {
 
 // ─── Overview tree printer ────────────────────────────────────────────────────
 
-func printOverviewTree(output *graph.OverviewOutput, highlightTitle string) {
+func printOverviewTree(output *OverviewOutput, highlightTitle string) {
 	childMap := make(map[string][]string)
 	rootNodes := []string{}
 

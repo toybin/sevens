@@ -1,6 +1,6 @@
 // Package config loads the global sevens configuration from
 // ~/.config/sevens/config.edn. It has no graph, function, or LLM
-// dependencies — only the store package for ConfigDir.
+// dependencies.
 package config
 
 import (
@@ -9,8 +9,20 @@ import (
 	"path/filepath"
 
 	"olympos.io/encoding/edn"
-	"sevens/internal/store"
 )
+
+// ConfigDir returns the path to ~/.config/sevens, creating it if needed.
+func ConfigDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("get home dir: %w", err)
+	}
+	dir := filepath.Join(home, ".config", "sevens")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("create config dir %s: %w", dir, err)
+	}
+	return dir, nil
+}
 
 // LLMConfig holds connection details for an LLM provider.
 type LLMConfig struct {
@@ -73,7 +85,7 @@ var defaultLLMConfig = LLMConfig{
 // LoadGlobalConfig reads and parses ~/.config/sevens/config.edn.
 // If the file does not exist, sensible defaults are returned.
 func LoadGlobalConfig() (GlobalConfig, error) {
-	configDir, err := store.ConfigDir()
+	configDir, err := ConfigDir()
 	if err != nil {
 		return GlobalConfig{}, fmt.Errorf("get config dir: %w", err)
 	}

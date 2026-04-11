@@ -5,13 +5,15 @@ import (
 	"os"
 	"strings"
 
-	"sevens/internal/apply"
 	projmd "sevens/internal/projection/md"
 	"sevens/internal/ui"
 )
 
 func (r *REPL) handleTemplates() error {
-	templates, err := apply.ListTemplates()
+	if r.templateR == nil {
+		return fmt.Errorf("template runner not available")
+	}
+	templates, err := r.templateR.ListTemplates()
 	if err != nil {
 		return fmt.Errorf("listing templates: %w", err)
 	}
@@ -22,7 +24,7 @@ func (r *REPL) handleTemplates() error {
 
 	fmt.Println()
 	for _, name := range templates {
-		tmpl, err := apply.LoadTemplate(name)
+		tmpl, err := r.templateR.LoadTemplate(name)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s %s: %v\n", ui.Warning.Render("[warn]"), name, err)
 			continue
@@ -34,7 +36,10 @@ func (r *REPL) handleTemplates() error {
 }
 
 func (r *REPL) handleCapture(tokens []string) error {
-	tmpl, err := apply.LoadTemplate("inbox-capture")
+	if r.templateR == nil {
+		return fmt.Errorf("template runner not available")
+	}
+	tmpl, err := r.templateR.LoadTemplate("inbox-capture")
 	if err != nil {
 		return err
 	}
@@ -45,7 +50,7 @@ func (r *REPL) handleCapture(tokens []string) error {
 	if err := r.validateRootFlag(root); err != nil {
 		return err
 	}
-	vars = apply.BindTemplateArgs(tmpl, args, vars)
+	vars = r.templateR.BindTemplateArgs(tmpl, args, vars)
 	return r.runTemplate(tmpl, parent, "", vars, dryRun)
 }
 
@@ -53,7 +58,10 @@ func (r *REPL) handleInstantiate(tokens []string) error {
 	if len(tokens) < 2 {
 		return fmt.Errorf("usage: instantiate <template> [args...]")
 	}
-	tmpl, err := apply.LoadTemplate(tokens[1])
+	if r.templateR == nil {
+		return fmt.Errorf("template runner not available")
+	}
+	tmpl, err := r.templateR.LoadTemplate(tokens[1])
 	if err != nil {
 		return err
 	}
@@ -64,14 +72,17 @@ func (r *REPL) handleInstantiate(tokens []string) error {
 	if err := r.validateRootFlag(root); err != nil {
 		return err
 	}
-	vars = apply.BindTemplateArgs(tmpl, args, vars)
+	vars = r.templateR.BindTemplateArgs(tmpl, args, vars)
 	if targetNode == "" && (tmpl.Mode == "append-node" || tmpl.Mode == "insert-block") && r.focus != "" {
 		targetNode = r.focus
 	}
 	return r.runTemplate(tmpl, parent, targetNode, vars, dryRun)
 }
 
-func (r *REPL) runTemplate(tmpl *apply.NodeTemplate, parent string, targetNode string, vars map[string]string, dryRun bool) error {
+func (r *REPL) runTemplate(tmpl *NodeTemplate, parent string, targetNode string, vars map[string]string, dryRun bool) error {
+	if r.templateR == nil {
+		return fmt.Errorf("template runner not available")
+	}
 	if targetNode == "." {
 		targetNode = r.focus
 	}
@@ -82,11 +93,7 @@ func (r *REPL) runTemplate(tmpl *apply.NodeTemplate, parent string, targetNode s
 		parent = canonical
 	}
 	if dryRun {
-		preview, err := apply.PreviewTemplate(r.db, r.root, tmpl, apply.TemplateExecutionOptions{
-			Parent:     parent,
-			TargetNode: targetNode,
-			Vars:       vars,
-		})
+		preview, err := r.templateR.PreviewTemplate(r.root, tmpl, parent, targetNode, vars)
 		if err != nil {
 			return err
 		}
@@ -94,11 +101,7 @@ func (r *REPL) runTemplate(tmpl *apply.NodeTemplate, parent string, targetNode s
 		return nil
 	}
 
-	result, err := apply.ExecuteTemplate(r.db, r.root, tmpl, apply.TemplateExecutionOptions{
-		Parent:     parent,
-		TargetNode: targetNode,
-		Vars:       vars,
-	})
+	result, err := r.templateR.ExecuteTemplate(r.root, tmpl, parent, targetNode, vars)
 	if err != nil {
 		return err
 	}
@@ -133,7 +136,7 @@ func (r *REPL) runTemplate(tmpl *apply.NodeTemplate, parent string, targetNode s
 	return nil
 }
 
-func (r *REPL) printTemplatePreview(preview *apply.TemplatePreview) {
+func (r *REPL) printTemplatePreview(preview *TemplatePreview) {
 	fmt.Println()
 	fmt.Println(ui.Label.Render("Template Preview"))
 	fmt.Printf("  %s %s\n", ui.Dim.Render("template:"), preview.TemplateName)
