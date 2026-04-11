@@ -14,13 +14,12 @@ import (
 
 // MarkdownProjection implements projection.Projection for markdown files.
 type MarkdownProjection struct {
-	kb    *kb.KB
-	store *triple.Store
+	kb *kb.KB
 }
 
 // New creates a markdown projection.
-func New(k *kb.KB, store *triple.Store) *MarkdownProjection {
-	return &MarkdownProjection{kb: k, store: store}
+func New(k *kb.KB) *MarkdownProjection {
+	return &MarkdownProjection{kb: k}
 }
 
 // Sync reads all markdown files in root, parses them, and writes
@@ -42,7 +41,7 @@ func (m *MarkdownProjection) Sync(ctx context.Context, root string) (*projection
 	tripleCount := 0
 	for _, node := range nodes {
 		triples := nodeToTriples(node, root)
-		if err := m.store.AssertBatch(ctx, triples); err != nil {
+		if err := m.kb.Graph().Store().AssertBatch(ctx, triples); err != nil {
 			return nil, fmt.Errorf("md: assert triples for %q: %w", node.Title, err)
 		}
 		tripleCount += len(triples)

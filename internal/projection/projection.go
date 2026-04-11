@@ -6,7 +6,14 @@
 // Implementations live in sub-packages (e.g., projection/md).
 package projection
 
-import "context"
+import (
+	"context"
+
+	"sevens/internal/sevtypes"
+)
+
+// FileOp is re-exported from sevtypes for convenience.
+type FileOp = sevtypes.FileOp
 
 // Projection is the contract for a presentational surface.
 // Transparent to the user -- they edit files, not projections.
@@ -34,18 +41,6 @@ type Projection interface {
 
 	// HasChanges returns true if the surface has uncommitted changes.
 	HasChanges(ctx context.Context, root string) (bool, error)
-}
-
-// FileOp is a single file operation produced by a function.
-type FileOp struct {
-	Action  string            // "create" or "edit"
-	Title   string            // for create: new node title
-	Parent  string            // for create: parent title
-	File    string            // for edit: target node title
-	OldText string            // for edit: text to find
-	NewText string            // for edit: replacement
-	Content string            // for create: markdown body
-	Extra   map[string]string // additional frontmatter
 }
 
 // SyncResult summarizes what changed during sync.

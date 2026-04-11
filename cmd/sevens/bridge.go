@@ -58,5 +58,5 @@ func (s *kbStack) Close() {
 
 // openProjection creates a markdown projection backed by a kbStack.
 func openProjection(stack *kbStack) *md.MarkdownProjection {
-	return md.New(stack.KB, stack.Store)
+	return md.New(stack.KB)
 }

@@ -34,7 +34,7 @@ func setup(t *testing.T, files map[string]string) (*md.MarkdownProjection, *kb.K
 	}
 	graph := graphops.New(store)
 	k := kb.New(graph)
-	proj := md.New(k, store)
+	proj := md.New(k)
 
 	dir := t.TempDir()
 	for name, content := range files {
