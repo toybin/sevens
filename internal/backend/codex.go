@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -66,17 +67,24 @@ func (b *CodexBackend) Complete(ctx context.Context, req InferenceRequest) (stri
 	// (prefixed sevens-*) by `sevens config generate codex`. No CODEX_HOME override
 	// needed — this preserves auth credentials and user config.
 
-	// Stream progress to the provided writer (typically stderr for terminal output)
+	// codex exec writes its full session transcript (headers, echoed prompt,
+	// assistant turn, token counts) to stderr. Buffer it silently so the
+	// terminal only sees the caller's own progress messages; surface it only
+	// on error. If a StreamTo is provided, tee to it as well.
+	var stderrBuf bytes.Buffer
 	if req.StreamTo != nil {
-		cmd.Stderr = req.StreamTo
+		cmd.Stderr = io.MultiWriter(req.StreamTo, &stderrBuf)
 	} else {
-		cmd.Stderr = os.Stderr
+		cmd.Stderr = &stderrBuf
 	}
 
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			stderr := string(exitErr.Stderr)
+			stderr := strings.TrimSpace(stderrBuf.String())
+			if stderr == "" {
+				stderr = strings.TrimSpace(string(exitErr.Stderr))
+			}
 			if stderr != "" {
 				return "", fmt.Errorf("codex exec failed (exit %d): %s", exitErr.ExitCode(), stderr)
 			}
