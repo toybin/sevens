@@ -34,8 +34,6 @@ Children:
 {{context}}
 
 <output-spec>
-Return plain text — your observations, not JSON.
-
 Structure your response with brief labeled sections only if you have findings in multiple categories:
 - **Patterns** — repeated themes or framings
 - **Gaps** — what's missing or underdeveloped
@@ -45,6 +43,4 @@ Structure your response with brief labeled sections only if you have findings in
 
 Omit any section you have nothing meaningful to say in. Prioritize depth over coverage — two sharp observations beat five shallow ones.
 
-Returns: freeform text observations
-Effects: none (read-only analysis)
 </output-spec>

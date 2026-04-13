@@ -730,24 +730,26 @@ func (q *testGraphQuerier) NodeTitle(subject string) (string, error) {
 func (q *testGraphQuerier) ListNodeTitles(root string) ([]string, error) { return nil, nil }
 func (q *testGraphQuerier) SearchTitles(query, root string) ([]string, error) { return nil, nil }
 func (q *testGraphQuerier) SearchContent(query, root string) ([]string, error) { return nil, nil }
-func (q *testGraphQuerier) BuildWalk(root, title string, depth int) (*WalkOutput, error) {
+func (q *testGraphQuerier) BuildWalk(root, title, shape string) (*WalkResult, error) {
 	subj := q.titles[title]
 	if subj == "" {
 		return nil, fmt.Errorf("node not found: %q", title)
 	}
-	var parent *string
+	result := &WalkResult{
+		Target: WalkNode{Title: title},
+	}
 	if p, ok := q.objs[subj]["node/parent"]; ok {
 		// Find parent title.
 		for t, s := range q.titles {
 			if s == p {
-				parent = &t
+				result.Parent = &WalkNode{Title: t}
 				break
 			}
 		}
 	}
-	return &WalkOutput{Node: WalkNode{Subject: subj, Title: title, Parent: parent}}, nil
+	return result, nil
 }
-func (q *testGraphQuerier) BuildOverview(root string) (*OverviewOutput, error) { return nil, nil }
+func (q *testGraphQuerier) BuildOverview(root string) ([]OverviewNode, error) { return nil, nil }
 func (q *testGraphQuerier) BuildBlockList(root, nodeTitle string) (BlockListOutput, error) { return BlockListOutput{}, nil }
 func (q *testGraphQuerier) BuildBlockDiff(root, nodeTitle string) (BlockDiffOutput, error) { return BlockDiffOutput{}, nil }
 func (q *testGraphQuerier) ChildrenSummary(root, nodeTitle string) ([]ChildSummary, error) { return nil, nil }

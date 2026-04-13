@@ -23,7 +23,9 @@ check-go:
 
 build: check-go $(BINARY)
 
-$(BINARY): go.mod
+GO_SRC := $(shell find . -name '*.go' -not -path './.claude/*') go.mod go.sum
+
+$(BINARY): $(GO_SRC)
 	@mkdir -p "$(BIN_DIR)"
 	GOCACHE="$(GOCACHE)" go build -o "$(BINARY)" ./cmd/sevens
 

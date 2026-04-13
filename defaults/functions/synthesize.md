@@ -31,15 +31,10 @@ Children:
 {{context}}
 
 <output-spec>
-Return a JSON array of suggestion objects:
-[{"title": "...", "rationale": "..."}]
-
 Each suggestion:
 - title: a short phrase naming the connection or insight (e.g., "The tension between X and Y", "Shared assumption across children: Z")
 - rationale: 1-2 sentences explaining what was noticed and why it matters
 
 Aim for 3-6 suggestions. Prefer specific, non-obvious insights over generic observations. Do not suggest things already explicit in the content.
 
-Returns: list of cross-node insights as suggestions
-Effects: none (analysis only — suggestions can be used to create new nodes or edits)
 </output-spec>

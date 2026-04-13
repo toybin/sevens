@@ -35,8 +35,6 @@ Children:
 {{context}}
 
 <output-spec>
-Return plain text — your findings, not JSON.
-
 For each contradiction found:
 
 **Contradiction**: [one sentence naming the conflict]

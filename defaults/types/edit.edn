@@ -1,0 +1,3 @@
+{:name "edit"
+ :primitive true
+ :schema-instruction "You MUST respond with a JSON object containing an \"ops\" field with an array of edit operations.\nEach edit operation: {\"action\": \"edit\", \"file\": \"Node Title\", \"old_text\": \"exact text to find\", \"new_text\": \"replacement text\"}\nRespond ONLY with valid JSON. No text outside the JSON object."}

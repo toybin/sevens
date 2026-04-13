@@ -1,4 +1,4 @@
 {:name "elaborate"
  :description "Expand sparse content with follow-up questions and deeper detail"
  :input "node"
- :output "ops"}
+ :output "edit"}

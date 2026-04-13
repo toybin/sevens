@@ -486,18 +486,22 @@ func (r *REPL) handleRelativeNav(rel, indexStr string) error {
 		return fmt.Errorf("graph querier not available")
 	}
 	var titles []string
-	walk, werr := r.graphQ.BuildWalk(r.root, focus, 1)
+	walk, werr := r.graphQ.BuildWalk(r.root, focus, "neighborhood")
 	if werr != nil {
 		return werr
 	}
 	switch rel {
 	case "child":
-		titles = walk.Node.Children
+		titles = walk.Target.Children
 	case "sibling":
-		if walk.Node.Parent == nil {
+		if walk.Parent == nil {
 			return fmt.Errorf("%q has no parent (no siblings)", focus)
 		}
-		titles = walk.Node.Siblings
+		var sibTitles []string
+		for _, s := range walk.Siblings {
+			sibTitles = append(sibTitles, s.Title)
+		}
+		titles = sibTitles
 	}
 	if n > len(titles) {
 		return fmt.Errorf("index %d out of range (1–%d)", n, len(titles))
@@ -553,20 +557,19 @@ func (r *REPL) showFocusSummary() error {
 	if r.graphQ == nil {
 		return nil
 	}
-	walk, err := r.graphQ.BuildWalk(r.root, r.focus, 1)
+	walk, err := r.graphQ.BuildWalk(r.root, r.focus, "neighborhood")
 	if err != nil {
 		return fmt.Errorf("building walk: %w", err)
 	}
-	n := walk.Node
 	var parts []string
-	if n.Parent != nil {
-		parts = append(parts, ui.Dim.Render("↑ "+*n.Parent))
+	if walk.Parent != nil {
+		parts = append(parts, ui.Dim.Render("↑ "+walk.Parent.Title))
 	}
-	if len(n.Children) > 0 {
-		parts = append(parts, ui.Dim.Render(fmt.Sprintf("%d children", len(n.Children))))
+	if len(walk.Children) > 0 {
+		parts = append(parts, ui.Dim.Render(fmt.Sprintf("%d children", len(walk.Children))))
 	}
-	if len(n.Siblings) > 0 {
-		parts = append(parts, ui.Dim.Render(fmt.Sprintf("%d siblings", len(n.Siblings))))
+	if len(walk.Siblings) > 0 {
+		parts = append(parts, ui.Dim.Render(fmt.Sprintf("%d siblings", len(walk.Siblings))))
 	}
 	if len(parts) > 0 {
 		fmt.Fprintf(os.Stderr, "  %s\n", strings.Join(parts, "  "))
@@ -577,9 +580,21 @@ func (r *REPL) showFocusSummary() error {
 // ─── Viewing commands ─────────────────────────────────────────────────────────
 
 func (r *REPL) handleWalk(tokens []string) error {
+	// Parse --shape flag from tokens.
+	shape := "sevens/neighborhood"
+	var rest []string
+	for i := 1; i < len(tokens); i++ {
+		if tokens[i] == "--shape" && i+1 < len(tokens) {
+			shape = tokens[i+1]
+			i++ // skip the value
+		} else {
+			rest = append(rest, tokens[i])
+		}
+	}
+
 	var nodeTitle string
-	if len(tokens) > 1 {
-		nodeTitle = strings.Join(tokens[1:], " ")
+	if len(rest) > 0 {
+		nodeTitle = strings.Join(rest, " ")
 		r.clearFocusBlock()
 	} else {
 		if r.focusBlock != nil {
@@ -595,18 +610,71 @@ func (r *REPL) handleWalk(tokens []string) error {
 	if r.graphQ == nil {
 		return fmt.Errorf("graph querier not available")
 	}
-	walk, err := r.graphQ.BuildWalk(r.root, nodeTitle, 1)
+
+	w, err := r.graphQ.BuildWalk(r.root, nodeTitle, shape)
 	if err != nil {
 		return fmt.Errorf("building walk: %w", err)
 	}
-	n := walk.Node
+
+	// Header.
+	var childTitles, sibTitles []string
+	for _, c := range w.Children {
+		childTitles = append(childTitles, c.Title)
+	}
+	for _, s := range w.Siblings {
+		sibTitles = append(sibTitles, s.Title)
+	}
+	var parentTitle *string
+	if w.Parent != nil {
+		parentTitle = &w.Parent.Title
+	}
+
 	fmt.Print(ui.FormatNodeHeader(
-		n.Title, n.Parent, n.Role,
-		n.Children, n.Siblings,
-		n.ChildRoles, n.SiblingRoles,
-		n.CrossRefs,
+		w.Target.Title, parentTitle, w.Target.Role,
+		childTitles, sibTitles,
+		w.ChildRoles, w.SiblingRoles,
+		w.CrossRefs,
 	))
-	fmt.Println(ui.RenderMarkdownOrPlain(n.Content))
+	fmt.Println(ui.RenderMarkdownOrPlain(w.Target.Content))
+
+	// Children content.
+	if shape != "sevens/minimal" && shape != "minimal" {
+		for _, child := range w.Children {
+			if child.Content == "" {
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "\n%s %s",
+				ui.Dim.Render("───"),
+				ui.Label.Render(child.Title))
+			if child.CharCount > 0 {
+				fmt.Fprintf(os.Stderr, " %s", ui.Dim.Render(fmt.Sprintf("(%d)", child.CharCount)))
+			}
+			fmt.Fprintln(os.Stderr)
+			fmt.Println(ui.RenderMarkdownOrPlain(child.Content))
+		}
+	}
+
+	// Siblings (neighborhood shape).
+	if shape == "sevens/neighborhood" || shape == "neighborhood" {
+		for _, sib := range w.Siblings {
+			if sib.Content == "" {
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "\n%s %s %s\n",
+				ui.Dim.Render("───"),
+				ui.Label.Render(sib.Title),
+				ui.Dim.Render("(sibling)"))
+			fmt.Println(ui.RenderMarkdownOrPlain(sib.Content))
+		}
+		if w.Parent != nil && w.Parent.Content != "" {
+			fmt.Fprintf(os.Stderr, "\n%s %s %s\n",
+				ui.Dim.Render("───"),
+				ui.Label.Render(w.Parent.Title),
+				ui.Dim.Render("(parent)"))
+			fmt.Println(ui.RenderMarkdownOrPlain(w.Parent.Content))
+		}
+	}
+
 	return nil
 }
 
@@ -618,12 +686,12 @@ func (r *REPL) handleChildren() error {
 	if r.graphQ == nil {
 		return fmt.Errorf("graph querier not available")
 	}
-	walk, err := r.graphQ.BuildWalk(r.root, focus, 1)
+	walk, err := r.graphQ.BuildWalk(r.root, focus, "neighborhood")
 	if err != nil {
 		return fmt.Errorf("building walk: %w", err)
 	}
 	fmt.Println()
-	r.printList(walk.Node.Children)
+	r.printList(walk.Target.Children)
 	fmt.Println()
 	return nil
 }
@@ -636,16 +704,20 @@ func (r *REPL) handleSiblings() error {
 	if r.graphQ == nil {
 		return fmt.Errorf("graph querier not available")
 	}
-	walk, err := r.graphQ.BuildWalk(r.root, focus, 1)
+	walk, err := r.graphQ.BuildWalk(r.root, focus, "neighborhood")
 	if err != nil {
 		return fmt.Errorf("building walk: %w", err)
 	}
-	if walk.Node.Parent == nil {
+	if walk.Parent == nil {
 		r.printSystem("(no parent — no siblings)")
 		return nil
 	}
+	var sibTitles []string
+	for _, s := range walk.Siblings {
+		sibTitles = append(sibTitles, s.Title)
+	}
 	fmt.Println()
-	r.printList(walk.Node.Siblings)
+	r.printList(sibTitles)
 	fmt.Println()
 	return nil
 }
@@ -777,12 +849,12 @@ func (r *REPL) handleOverview() error {
 	if r.graphQ == nil {
 		return fmt.Errorf("graph querier not available")
 	}
-	output, err := r.graphQ.BuildOverview(r.root)
+	nodes, err := r.graphQ.BuildOverview(r.root)
 	if err != nil {
 		return fmt.Errorf("building overview: %w", err)
 	}
 	// Re-use the tree printer logic inline.
-	printOverviewTree(output, r.focus)
+	printOverviewTree(nodes, r.focus)
 	return nil
 }
 
@@ -1029,11 +1101,11 @@ func parseInlineFlags(tokens []string) inlineFlags {
 
 // ─── Overview tree printer ────────────────────────────────────────────────────
 
-func printOverviewTree(output *OverviewOutput, highlightTitle string) {
+func printOverviewTree(nodes []OverviewNode, highlightTitle string) {
 	childMap := make(map[string][]string)
 	rootNodes := []string{}
 
-	for _, n := range output.Nodes {
+	for _, n := range nodes {
 		if n.Parent == nil {
 			rootNodes = append(rootNodes, n.Title)
 		} else {

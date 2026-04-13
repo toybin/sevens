@@ -24,8 +24,6 @@ Children:
 {{context}}
 
 <output-spec>
-Return plain text with these sections:
-
 **Thesis**: [one sentence]
 
 **Argument type**: [what kind of claim this is]

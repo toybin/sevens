@@ -18,8 +18,9 @@ const (
 
 // Signature is the backend-agnostic contract for a step's I/O.
 type Signature struct {
-	Shape  OutputShape
-	Schema string // for structured: JSON schema
+	Shape    OutputShape
+	Schema   string // for structured: JSON schema
+	TypeName string // name of the type that output nodes should conform to
 }
 
 // --- Gate configuration ---
@@ -39,7 +40,7 @@ type GateSpec struct {
 	HistoryPolicy    HistoryPolicy
 	Cancelable       bool
 	AutoAccept       bool
-	RollbackOnReject bool
+	RollbackOnReject bool // declared but not yet enforced by the executor
 }
 
 // --- Control flow ---
@@ -50,7 +51,6 @@ type FlowKind int
 const (
 	FlowSequence FlowKind = iota
 	FlowLoop
-	FlowBranch
 )
 
 // Termination describes when a loop ends.
@@ -144,13 +144,14 @@ type Param struct {
 
 // DeterministicConfig holds the configuration for a deterministic backend step.
 type DeterministicConfig struct {
-	Mode            string `json:"mode"`                        // "create-node", "append-node", "insert-block"
-	TitlePattern    string `json:"title_pattern,omitempty"`     // for create-node
-	Parent          string `json:"parent,omitempty"`            // for create-node
-	ParentTemplate  string `json:"parent_template,omitempty"`   // bootstrap parent if missing
-	Target          string `json:"target,omitempty"`            // for append-node/insert-block ("." = focused node)
-	Heading         string `json:"heading,omitempty"`           // for insert-block
-	CreateIfMissing bool   `json:"create_if_missing,omitempty"` // for insert-block
+	Mode            string            `json:"mode"`                        // "create-node", "append-node", "insert-block"
+	TitlePattern    string            `json:"title_pattern,omitempty"`     // for create-node
+	Parent          string            `json:"parent,omitempty"`            // for create-node
+	ParentTemplate  string            `json:"parent_template,omitempty"`   // bootstrap parent if missing
+	Target          string            `json:"target,omitempty"`            // for append-node/insert-block ("." = focused node)
+	Heading         string            `json:"heading,omitempty"`           // for insert-block
+	CreateIfMissing bool              `json:"create_if_missing,omitempty"` // for insert-block
+	Frontmatter     map[string]string `json:"frontmatter,omitempty"`      // extra frontmatter fields for create-node
 }
 
 // Function is a named, reusable transformation.
@@ -167,14 +168,3 @@ func (f *Function) EffectiveSteps() []Step {
 	return f.Steps
 }
 
-// ValidateComposition checks that step output signatures chain correctly.
-func (f *Function) ValidateComposition() error {
-	steps := f.EffectiveSteps()
-	for i := 0; i < len(steps)-1; i++ {
-		// For now: just check that output shape is compatible with
-		// what the next step might expect. Full signature matching
-		// is a TODO.
-		_ = steps[i]
-	}
-	return nil
-}

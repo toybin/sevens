@@ -18,9 +18,10 @@ type RenderedPrompt struct {
 
 // TransformResult is what a backend produces.
 type TransformResult struct {
-	Raw    string
-	Ops    []FileOp
-	IsText bool // true if display-only
+	Raw         string
+	Ops         []FileOp
+	Suggestions []Suggestion
+	IsText      bool // true if display-only
 }
 
 // RevisionEntry is one (attempt, feedback) pair.

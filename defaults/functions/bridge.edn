@@ -9,4 +9,4 @@
    :with ["node/content"]
    :as "parent"}]
  :input "node"
- :output "ops"}
+ :output "edit"}

@@ -21,6 +21,7 @@ const (
 	PredPipelineAccumulator  = "pipeline/accumulator"
 	PredPipelinePriorResults = "pipeline/prior-results"
 	PredPipelineRevisions    = "pipeline/revisions"
+	PredPipelineBackend      = "pipeline/backend"
 )
 
 // PipelineStore persists pipeline state as triples.
@@ -46,6 +47,11 @@ func (ps *PipelineStore) Save(ctx context.Context, p *Pipeline) error {
 		{Subject: p.ID, Predicate: PredPipelineTarget, Object: p.Target},
 		{Subject: p.ID, Predicate: PredPipelinePhase, Object: p.Phase.String()},
 		{Subject: p.ID, Predicate: PredPipelineStep, Object: strconv.Itoa(p.CurrentStep)},
+	}
+	if p.BackendName != "" {
+		triples = append(triples, triple.Triple{
+			Subject: p.ID, Predicate: PredPipelineBackend, Object: p.BackendName,
+		})
 	}
 
 	if p.CurrentResult != nil {
@@ -134,6 +140,8 @@ func (ps *PipelineStore) Load(ctx context.Context, id string) (*Pipeline, error)
 			if err := json.Unmarshal([]byte(t.Object), &revisions); err == nil {
 				p.RevisionChain = revisions
 			}
+		case PredPipelineBackend:
+			p.BackendName = t.Object
 		}
 	}
 

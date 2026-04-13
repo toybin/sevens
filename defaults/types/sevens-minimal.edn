@@ -1,0 +1,4 @@
+{:name "sevens/minimal"
+ :context-policy true
+ :description "Target node only"
+ :gather {:target true}}

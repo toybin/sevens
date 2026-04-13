@@ -36,11 +36,7 @@ Prior analysis to promote from:
 {{context}}
 
 <output-spec>
-Return a JSON array of create operations:
-[{"action": "create", "title": "New Node Title", "parent": "{{title}}", "content": "markdown body only, no frontmatter"}]
-
 Rules:
-- Content field: ONLY markdown body, no frontmatter
 - Each new node should have scaffolding questions and initial framing, not just a title
 - Use [[wiki links]] to reference existing nodes
 - Create 1-4 nodes, not every insight

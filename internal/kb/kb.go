@@ -132,7 +132,7 @@ func (k *KB) SetRole(ctx context.Context, root, title, role string) error {
 
 // RegisterRoot stores a root registration in the graph as triples.
 func (k *KB) RegisterRoot(ctx context.Context, root string) error {
-	subject := "root:" + rootHash(root)
+	subject := "root:" + RootHash(root)
 	return k.graph.Set(ctx, subject, "root/path", root)
 }
 

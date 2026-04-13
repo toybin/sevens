@@ -16,6 +16,15 @@ import (
 
 const testRoot = "/tmp/test-root"
 
+// walkNodeTitles extracts titles from a slice of WalkNode.
+func walkNodeTitles(nodes []kb.WalkNode) []string {
+	var titles []string
+	for _, n := range nodes {
+		titles = append(titles, n.Title)
+	}
+	return titles
+}
+
 func testKB(t *testing.T) *kb.KB {
 	t.Helper()
 	db, err := sql.Open("turso", ":memory:")
@@ -75,15 +84,15 @@ func TestCreateNode(t *testing.T) {
 	}
 
 	// Verify via Walk
-	w, err := k.Walk(ctx(), testRoot, "Child Note")
+	w, err := k.Walk(ctx(), testRoot, "Child Note", kb.GatherNeighborhood)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w.Title != "Child Note" {
-		t.Fatalf("expected title 'Child Note', got %q", w.Title)
+	if w.Target.Title != "Child Note" {
+		t.Fatalf("expected title 'Child Note', got %q", w.Target.Title)
 	}
-	if w.Content != "hello world" {
-		t.Fatalf("expected content 'hello world', got %q", w.Content)
+	if w.Target.Content != "hello world" {
+		t.Fatalf("expected content 'hello world', got %q", w.Target.Content)
 	}
 }
 
@@ -95,7 +104,7 @@ func TestCreateNodeNoParent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w, err := k.Walk(ctx(), testRoot, "Root Note")
+	w, err := k.Walk(ctx(), testRoot, "Root Note", kb.GatherNeighborhood)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,15 +126,16 @@ func TestWalkParentAndChildren(t *testing.T) {
 	k.CreateNode(ctx(), testRoot, "C", "c content", &p)
 
 	// Walk Root -- should see 3 children
-	w, _ := k.Walk(ctx(), testRoot, "Root")
-	sort.Strings(w.Children)
-	if len(w.Children) != 3 || w.Children[0] != "A" || w.Children[1] != "B" || w.Children[2] != "C" {
-		t.Fatalf("expected children [A B C], got %v", w.Children)
+	w, _ := k.Walk(ctx(), testRoot, "Root", kb.GatherNeighborhood)
+	childTitles := walkNodeTitles(w.Children)
+	sort.Strings(childTitles)
+	if len(childTitles) != 3 || childTitles[0] != "A" || childTitles[1] != "B" || childTitles[2] != "C" {
+		t.Fatalf("expected children [A B C], got %v", childTitles)
 	}
 
 	// Walk A -- should see Root as parent
-	w, _ = k.Walk(ctx(), testRoot, "A")
-	if w.Parent == nil || *w.Parent != "Root" {
+	w, _ = k.Walk(ctx(), testRoot, "A", kb.GatherNeighborhood)
+	if w.Parent == nil || w.Parent.Title != "Root" {
 		t.Fatalf("expected parent 'Root', got %v", w.Parent)
 	}
 }
@@ -139,10 +149,11 @@ func TestWalkSiblings(t *testing.T) {
 	k.CreateNode(ctx(), testRoot, "B", "", &p)
 	k.CreateNode(ctx(), testRoot, "C", "", &p)
 
-	w, _ := k.Walk(ctx(), testRoot, "B")
-	sort.Strings(w.Siblings)
-	if len(w.Siblings) != 2 || w.Siblings[0] != "A" || w.Siblings[1] != "C" {
-		t.Fatalf("expected siblings [A C], got %v", w.Siblings)
+	w, _ := k.Walk(ctx(), testRoot, "B", kb.GatherNeighborhood)
+	sibTitles := walkNodeTitles(w.Siblings)
+	sort.Strings(sibTitles)
+	if len(sibTitles) != 2 || sibTitles[0] != "A" || sibTitles[1] != "C" {
+		t.Fatalf("expected siblings [A C], got %v", sibTitles)
 	}
 }
 
@@ -153,7 +164,7 @@ func TestWalkCrossRefs(t *testing.T) {
 	k.CreateNode(ctx(), testRoot, "B", "", nil)
 	k.LinkNodes(ctx(), testRoot, "A", "B")
 
-	w, _ := k.Walk(ctx(), testRoot, "A")
+	w, _ := k.Walk(ctx(), testRoot, "A", kb.GatherNeighborhood)
 	if len(w.CrossRefs) != 1 || w.CrossRefs[0] != "B" {
 		t.Fatalf("expected cross-refs [B], got %v", w.CrossRefs)
 	}
@@ -169,7 +180,7 @@ func TestWalkRoles(t *testing.T) {
 	k.SetRole(ctx(), testRoot, "Pro", "support")
 	k.SetRole(ctx(), testRoot, "Con", "counterexample")
 
-	w, _ := k.Walk(ctx(), testRoot, "Root")
+	w, _ := k.Walk(ctx(), testRoot, "Root", kb.GatherNeighborhood)
 	if w.ChildRoles["Pro"] != "support" {
 		t.Fatalf("expected Pro role 'support', got %q", w.ChildRoles["Pro"])
 	}
@@ -288,9 +299,9 @@ func TestSetContent(t *testing.T) {
 
 	k.SetContent(ctx(), testRoot, "Note", "new content")
 
-	w, _ := k.Walk(ctx(), testRoot, "Note")
-	if w.Content != "new content" {
-		t.Fatalf("expected 'new content', got %q", w.Content)
+	w, _ := k.Walk(ctx(), testRoot, "Note", kb.GatherMinimal)
+	if w.Target.Content != "new content" {
+		t.Fatalf("expected 'new content', got %q", w.Target.Content)
 	}
 }
 
@@ -369,7 +380,7 @@ func TestUnlinkNodes(t *testing.T) {
 
 	k.UnlinkNodes(ctx(), testRoot, "A", "B")
 
-	w, _ := k.Walk(ctx(), testRoot, "A")
+	w, _ := k.Walk(ctx(), testRoot, "A", kb.GatherNeighborhood)
 	if len(w.CrossRefs) != 0 {
 		t.Fatalf("expected no cross-refs after unlink, got %v", w.CrossRefs)
 	}
@@ -438,6 +449,53 @@ func TestValidateOrphans(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected orphan violation for 'Orphan'")
+	}
+}
+
+func TestValidateNoCycleInSimpleTree(t *testing.T) {
+	k := testKB(t)
+	k.CreateNode(ctx(), testRoot, "Root", "", nil)
+	p := "Root"
+	k.CreateNode(ctx(), testRoot, "A", "", &p)
+	k.CreateNode(ctx(), testRoot, "B", "", &p)
+	k.CreateNode(ctx(), testRoot, "C", "", &p)
+
+	violations, err := k.Validate(ctx(), testRoot, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range violations {
+		if v.Kind == "cycle" {
+			t.Fatalf("unexpected cycle violation: %s — %s", v.Title, v.Detail)
+		}
+	}
+}
+
+func TestValidateDetectsRealCycle(t *testing.T) {
+	k := testKB(t)
+	// Create two nodes, then inject a cycle via raw triples
+	// (MoveNode refuses cycles, so we go under the hood)
+	k.CreateNode(ctx(), testRoot, "A", "", nil)
+	pA := "A"
+	k.CreateNode(ctx(), testRoot, "B", "", &pA)
+
+	// Force A's parent to B, creating A -> B -> A
+	subjA := kb.NodeSubject(testRoot, "A")
+	subjB := kb.NodeSubject(testRoot, "B")
+	k.Graph().Set(ctx(), subjA, "node/parent", subjB)
+
+	violations, err := k.Validate(ctx(), testRoot, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cycleCount int
+	for _, v := range violations {
+		if v.Kind == "cycle" {
+			cycleCount++
+		}
+	}
+	if cycleCount == 0 {
+		t.Fatal("expected cycle violation for A->B->A cycle")
 	}
 }
 

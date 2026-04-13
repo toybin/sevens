@@ -3,117 +3,59 @@ package repl
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
-	"time"
 
-	projmd "sevens/internal/projection/md"
 	"sevens/internal/ui"
 )
 
-// isThreaded checks if a discussion file has multiple # headings,
-// indicating it has branched into threads.
-func isThreaded(filePath string) bool {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return false
-	}
-	headingCount := 0
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.HasPrefix(line, "# ") {
-			headingCount++
-		}
-	}
-	return headingCount > 1
-}
-
-// resolveDiscussionFilePath looks up the file path for a discussion node.
-// It uses the REPL's graphQ interface.
-func (r *REPL) resolveDiscussionFilePath(root, discussTitle string) (string, error) {
-	if r.graphQ == nil {
-		return "", fmt.Errorf("graph querier not available")
-	}
-	subject, _ := r.graphQ.ResolveNode(discussTitle, root)
-	if subject == "" {
-		return "", nil
-	}
-	return r.graphQ.GetObject(subject, "node/file-path")
-}
-
 // enterDiscussion starts or continues a discussion.
-// If nonInteractive is true, or the discussion is threaded, it runs the discuss
-// function once and returns (no interactive [you]> loop).
+// If nonInteractive is true, or the discussion is threaded, it runs once and returns.
 func (r *REPL) enterDiscussion(nonInteractive bool) error {
 	focus, err := r.requireFocus()
 	if err != nil {
 		return err
 	}
 
-	fn, err := r.loadFunctionDef("discuss")
-	if err != nil {
-		return fmt.Errorf("loading discuss function: %w", err)
+	if r.discussR == nil {
+		return fmt.Errorf("discussion runner not available")
 	}
 
+	// Check if threaded — force non-interactive.
 	discussTitle := "Discussion - " + focus
-
-	// Check if the discussion file already exists before we create/modify it.
-	existingPath, _ := r.resolveDiscussionFilePath(r.root, discussTitle)
-	fileExistedBefore := existingPath != ""
-
-	// Check if the discussion is threaded — if so, force non-interactive.
-	if existingPath != "" && isThreaded(existingPath) {
-		if !nonInteractive {
-			r.printSystem("discussion is threaded — running non-interactively")
-			r.printSystem("edit the discussion file directly to add [user] messages to specific threads")
+	if r.graphQ != nil {
+		if subj, _ := r.graphQ.ResolveNode(discussTitle, r.root); subj != "" {
+			if fp, _ := r.graphQ.GetObject(subj, "node/file-path"); fp != "" {
+				if r.discussR.IsThreaded(fp) {
+					if !nonInteractive {
+						r.printSystem("discussion is threaded — running non-interactively")
+						r.printSystem("edit the discussion file directly to add [user] messages to specific threads")
+					}
+					nonInteractive = true
+				}
+			}
 		}
-		nonInteractive = true
 	}
 
-	// Run the discuss function.
 	r.printSystem("starting discussion...")
-	if err := r.runPipeline(focus, fn, 0, "", false, pipelineOpts{
-		skipAutoAccept: true,
-		suppressHint:   true,
-	}); err != nil {
+	state, agentOutput, err := r.discussR.StartDiscussion(r.root, focus)
+	if err != nil {
 		return err
 	}
 
-	// Accept the pending ops directly.
-	if err := r.doAccept(focus, ""); err != nil {
-		r.printSystem("note: %v", err)
+	// Display agent output.
+	if agentOutput != "" {
+		fmt.Println()
+		fmt.Println(agentOutput)
+		fmt.Println()
 	}
-
-	r.resyncQuiet()
-
-	// Resolve the file path now (it may have just been created by the pipeline).
-	resolvedPath, _ := r.resolveDiscussionFilePath(r.root, discussTitle)
-
-	// Show the latest agent turns.
-	r.showDiscussionTurns(discussTitle)
 
 	if nonInteractive {
 		return nil
 	}
 
 	// Enter interactive discussion mode.
-	// Commit the initial discussion file so we have a clean base to revert to.
-	var initialCommit string
-	if projmd.IsGitRepo(r.root) && resolvedPath != "" {
-		h, cerr := projmd.CommitFiles(r.root,
-			fmt.Sprintf("sevens: discussion on %q (draft)", focus), []string{resolvedPath})
-		if cerr != nil {
-			fmt.Fprintf(os.Stderr, "%s git commit: %v\n", ui.Warning.Render("[warn]"), cerr)
-		} else {
-			initialCommit = h
-		}
-	}
-
 	r.mode = ModeDiscussion
-	r.discussNode = discussTitle
-	r.discussFileCreated = !fileExistedBefore
-	r.discussFilePath = resolvedPath
-	r.discussCommit = initialCommit
+	r.discussState = state
 	r.rl.SetPrompt(modeStyle.Render("[you]>") + " ")
 	r.printSystem(".end to save, .cancel to discard")
 	return nil
@@ -131,13 +73,13 @@ func (r *REPL) handleDiscussionInput(line string) error {
 		return nil
 	}
 
-	// All dot commands pass through to normal dispatch.
+	// Dot commands pass through to normal dispatch.
 	if strings.HasPrefix(line, ".") {
 		tokens := tokenize(line)
 		return r.handleDot(tokens)
 	}
 
-	// Named commands that aren't user text pass through to dispatch.
+	// Named commands pass through to dispatch.
 	firstWord := line
 	if idx := strings.IndexByte(line, ' '); idx > 0 {
 		firstWord = line[:idx]
@@ -147,64 +89,36 @@ func (r *REPL) handleDiscussionInput(line string) error {
 			return r.dispatch(line)
 		}
 	}
-	// Function names also pass through.
 	if isFunctionName(firstWord) {
 		return r.dispatch(line)
 	}
 
-	// User message — append to discussion file with timestamp, re-run discuss.
-	focus := r.focus
-	discussTitle := r.discussNode
-
-	filePath, err := r.resolveDiscussionFilePath(r.root, discussTitle)
-	if err != nil || filePath == "" {
-		return fmt.Errorf("could not find discussion file for %q", discussTitle)
-	}
-
-	// Append user turn with local timestamp.
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return fmt.Errorf("reading discussion file: %w", err)
-	}
-	timestamp := time.Now().Format("2006-01-02 15:04")
-	content := strings.TrimRight(string(data), "\n")
-	content += fmt.Sprintf("\n\n**[user %s]** %s\n", timestamp, line)
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
-		return fmt.Errorf("writing discussion file: %w", err)
-	}
-
-	if err := r.resync(); err != nil {
-		return fmt.Errorf("re-sync: %w", err)
-	}
-
-	// Run discuss again.
-	fn, err := r.loadFunctionDef("discuss")
-	if err != nil {
-		return fmt.Errorf("loading discuss: %w", err)
+	// User message — continue discussion.
+	if r.discussR == nil || r.discussState == nil {
+		return fmt.Errorf("discussion not active")
 	}
 
 	r.printSystem("thinking...")
-	if err := r.runPipeline(focus, fn, 0, "", false, pipelineOpts{skipAutoAccept: true}); err != nil {
+	agentOutput, err := r.discussR.ContinueDiscussion(r.root, r.discussState, line)
+	if err != nil {
 		return err
 	}
 
-	if err := r.doAccept(focus, ""); err != nil {
-		return fmt.Errorf("applying agent response: %w", err)
+	if agentOutput != "" {
+		fmt.Println()
+		fmt.Println(agentOutput)
+		fmt.Println()
 	}
-
-	r.resyncQuiet()
-	r.showDiscussionTurns(discussTitle)
 	return nil
 }
 
 func (r *REPL) endDiscussion() error {
-	if projmd.IsGitRepo(r.root) && r.discussFilePath != "" {
-		h, err := projmd.CommitFiles(r.root,
-			fmt.Sprintf("sevens: discussion on %q", r.focus), []string{r.discussFilePath})
+	if r.discussR != nil && r.discussState != nil {
+		hash, err := r.discussR.EndDiscussion(r.root, r.discussState)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "%s git commit: %v\n", ui.Warning.Render("[warn]"), err)
-		} else {
-			fmt.Fprintf(os.Stderr, "%s saved (%s)\n", ui.Success.Render("[discuss]"), h)
+			fmt.Fprintf(os.Stderr, "%s %v\n", ui.Warning.Render("[warn]"), err)
+		} else if hash != "" {
+			fmt.Fprintf(os.Stderr, "%s saved (%s)\n", ui.Success.Render("[discuss]"), hash)
 		}
 	}
 
@@ -213,56 +127,15 @@ func (r *REPL) endDiscussion() error {
 	}
 
 	r.mode = ModeNormal
-	r.discussNode = ""
+	r.discussState = nil
 	r.updatePrompt()
 	return nil
 }
 
 func (r *REPL) cancelDiscussion() error {
-	// Revert the draft commit if one was made during enterDiscussion.
-	if r.discussCommit != "" && projmd.IsGitRepo(r.root) {
-		var revertErr error
-		if r.applyR != nil {
-			_, revertErr = r.applyR.RevertCommit(r.root, r.discussCommit)
-		} else {
-			revertErr = fmt.Errorf("apply runner not available")
-		}
-		if revertErr != nil {
-			fmt.Fprintf(os.Stderr, "%s could not revert draft commit %s: %v\n",
-				ui.Warning.Render("[warn]"), r.discussCommit, revertErr)
-		}
-	} else if r.discussFilePath != "" {
-		// No commit was recorded — handle the file directly.
-		if r.discussFileCreated {
-			// File was newly created: just delete it.
-			if err := os.Remove(r.discussFilePath); err != nil && !os.IsNotExist(err) {
-				fmt.Fprintf(os.Stderr, "%s could not remove discussion file: %v\n",
-					ui.Warning.Render("[warn]"), err)
-			}
-			// Remove from git index if in a git repo.
-			if projmd.IsGitRepo(r.root) {
-				relPath, err := filepath.Rel(r.root, r.discussFilePath)
-				if err == nil {
-					exec.Command("git", "-C", r.root, "rm", "--cached", "--force", relPath).Run()
-				}
-			}
-		} else {
-			// File existed before: restore it from git if possible.
-			if projmd.IsGitRepo(r.root) {
-				relPath, err := filepath.Rel(r.root, r.discussFilePath)
-				if err == nil {
-					if out, err := exec.Command("git", "-C", r.root, "checkout", "--", relPath).CombinedOutput(); err != nil {
-						fmt.Fprintf(os.Stderr, "%s could not restore discussion file: %s\n",
-							ui.Warning.Render("[warn]"), strings.TrimSpace(string(out)))
-					}
-				} else {
-					fmt.Fprintf(os.Stderr, "%s could not compute relative path for restore: %v\n",
-						ui.Warning.Render("[warn]"), err)
-				}
-			} else {
-				fmt.Fprintf(os.Stderr, "%s not a git repo — cannot restore existing discussion file\n",
-					ui.Warning.Render("[warn]"))
-			}
+	if r.discussR != nil && r.discussState != nil {
+		if err := r.discussR.CancelDiscussion(r.root, r.discussState); err != nil {
+			fmt.Fprintf(os.Stderr, "%s %v\n", ui.Warning.Render("[warn]"), err)
 		}
 	}
 
@@ -272,18 +145,22 @@ func (r *REPL) cancelDiscussion() error {
 
 	r.printSystem("discussion discarded")
 	r.mode = ModeNormal
-	r.discussNode = ""
-	r.discussFileCreated = false
-	r.discussFilePath = ""
-	r.discussCommit = ""
+	r.discussState = nil
 	r.updatePrompt()
 	return nil
 }
 
 // showDiscussionTurns reads the discussion file and prints the last agent turns.
 func (r *REPL) showDiscussionTurns(discussTitle string) {
-	filePath, err := r.resolveDiscussionFilePath(r.root, discussTitle)
-	if err != nil || filePath == "" {
+	if r.graphQ == nil {
+		return
+	}
+	subj, _ := r.graphQ.ResolveNode(discussTitle, r.root)
+	if subj == "" {
+		return
+	}
+	filePath, _ := r.graphQ.GetObject(subj, "node/file-path")
+	if filePath == "" {
 		return
 	}
 	data, err := os.ReadFile(filePath)
@@ -294,7 +171,6 @@ func (r *REPL) showDiscussionTurns(discussTitle string) {
 	content := string(data)
 	lines := strings.Split(content, "\n")
 
-	// Find the last contiguous block of [agent ...] turns (after the last [user ...] turn).
 	var lastAgentBlock []string
 	for _, l := range lines {
 		if strings.HasPrefix(l, "**[agent") {

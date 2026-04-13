@@ -1,0 +1,4 @@
+{:name "priority"
+ :kind "enum"
+ :members ["low" "medium" "high" "urgent"]
+ :aliases {"!" "urgent" "!!" "high"}}

@@ -3,4 +3,4 @@
  :requires [{:role "parent" :optional true}
             {:role "children"}]
  :input "node"
- :output "ops"}
+ :output "edit"}

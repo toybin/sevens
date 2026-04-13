@@ -13,41 +13,14 @@ import (
 
 // --- Graph queries (replaces graph + store imports) ---
 
-// WalkNode is the REPL's view of a walked node.
-type WalkNode struct {
-	Subject      string
-	Title        string
-	Parent       *string
-	Content      string
-	Children     []string
-	Siblings     []string
-	CrossRefs    []string
-	ChildRoles   map[string]string
-	SiblingRoles map[string]string
-	Role         string
-	ContextFiles []string // from frontmatter
-}
+// WalkNode is a type alias for sevtypes.WalkNode.
+type WalkNode = sevtypes.WalkNode
 
-// WalkOutput wraps a walked node and any unvisited titles.
-type WalkOutput struct {
-	Node     WalkNode
-	Unwalked []string
-}
+// WalkResult is a type alias for sevtypes.WalkResult.
+type WalkResult = sevtypes.WalkResult
 
-// OverviewNode is one node in the full tree.
-type OverviewNode struct {
-	Title      string
-	Parent     *string
-	Children   []string
-	ChildCount int
-	CrossRefs  []string
-	CharCount  int
-}
-
-// OverviewOutput is the full tree.
-type OverviewOutput struct {
-	Nodes []OverviewNode
-}
+// OverviewNode is a type alias for sevtypes.OverviewNode.
+type OverviewNode = sevtypes.OverviewNode
 
 // BlockListEntry is one block in a block listing.
 type BlockListEntry struct {
@@ -142,8 +115,8 @@ type GraphQuerier interface {
 	SearchContent(query, root string) ([]string, error)
 
 	// Walk / overview
-	BuildWalk(root, title string, depth int) (*WalkOutput, error)
-	BuildOverview(root string) (*OverviewOutput, error)
+	BuildWalk(root, title, shape string) (*WalkResult, error)
+	BuildOverview(root string) ([]OverviewNode, error)
 
 	// Block operations
 	BuildBlockList(root, nodeTitle string) (BlockListOutput, error)
@@ -289,6 +262,26 @@ type PipelineRunner interface {
 
 	// Revision
 	ReviseStep(cfg ReviseConfig) (*ReviseResult, error)
+}
+
+// --- Discussion (multi-turn conversation) ---
+
+// DiscussionState tracks an active discussion session.
+type DiscussionState struct {
+	DiscussTitle  string
+	FilePath      string
+	InitialCommit string
+	FileCreated   bool
+	FocusTitle    string
+}
+
+// DiscussionRunner abstracts multi-turn discussion workflow.
+type DiscussionRunner interface {
+	StartDiscussion(root, nodeTitle string) (*DiscussionState, string, error)
+	ContinueDiscussion(root string, state *DiscussionState, userInput string) (string, error)
+	EndDiscussion(root string, state *DiscussionState) (string, error)
+	CancelDiscussion(root string, state *DiscussionState) error
+	IsThreaded(filePath string) bool
 }
 
 // --- Apply operations (replaces apply imports) ---

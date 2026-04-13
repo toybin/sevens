@@ -30,18 +30,16 @@ If the node already has well-developed section structure, return `[]`.
 </target-node>
 
 <graph-context>
-Parent: {{parent-content}}
+Parent: {{parent.content}}
 Current children: {{children}}
 Children content:
-{{children-content}}
+{{children.content}}
 </graph-context>
 
 {{context}}
 
 <output-spec>
-Return a JSON array of edit operations only:
-[{"action": "edit", "file": "{{title}}", "old_text": "exact text to find", "new_text": "original text followed by new scaffold sections"}]
-
-Returns: edit operations on the target node
-Effects: modifies the target node file in place, does NOT create new files
+Rules:
+- Edit operations must use exact string matches from the source content
+- Modifies the target node file in place, does NOT create new files
 </output-spec>

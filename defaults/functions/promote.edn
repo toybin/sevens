@@ -1,5 +1,5 @@
 {:name "promote"
  :description "Turn suggestions from a prior synthesize/notice run into new child nodes"
  :input "node"
- :output "ops"
+ :output "create"
  :cross-walk "synthesize"}

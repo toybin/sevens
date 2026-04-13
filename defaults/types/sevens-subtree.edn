@@ -1,0 +1,4 @@
+{:name "sevens/subtree"
+ :context-policy true
+ :description "Full recursive subtree from target"
+ :gather {:target true :subtree true}}

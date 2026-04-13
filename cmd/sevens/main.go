@@ -9,19 +9,23 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"olympos.io/encoding/edn"
+	"sevens/defaults"
 	"sevens/internal/backend"
 	"sevens/internal/config"
 	"sevens/internal/function"
 	"sevens/internal/kb"
 	"sevens/internal/projection"
 	projmd "sevens/internal/projection/md"
+	sevtypes "sevens/internal/types"
 	"sevens/internal/ui"
+	"sevens/internal/workflow"
 	_ "turso.tech/database/tursogo"
 )
 
@@ -132,8 +136,14 @@ func syncRoot(rootDir string) error {
 		return fmt.Errorf("syncing: %w", err)
 	}
 
+	// Load max-children from .sevens.edn config, default to 9.
+	maxChildren := 9
+	if cfg, cfgErr := projmd.LoadConfig(root); cfgErr == nil && cfg.MaxChildren != nil {
+		maxChildren = *cfg.MaxChildren
+	}
+
 	// Validate via new KB
-	violations, err := stack.KB.Validate(context.Background(), root, 9, 0)
+	violations, err := stack.KB.Validate(context.Background(), root, maxChildren, 0)
 	if err != nil {
 		return fmt.Errorf("validating: %w", err)
 	}
@@ -260,7 +270,7 @@ func runGitInit(dir string) (string, error) {
 	return string(out), nil
 }
 
-// printTree renders an OverviewOutput as a human-readable ASCII tree.
+// formatCharCount renders a character count for display.
 func formatCharCount(n int) string {
 	if n >= 1000 {
 		return fmt.Sprintf("%.1fk", float64(n)/1000.0)
@@ -268,20 +278,12 @@ func formatCharCount(n int) string {
 	return fmt.Sprintf("%d", n)
 }
 
-// printTreeFromNodes prints a tree from kb.OverviewNode slice.
-// violations is optional -- printed after the tree.
-func printTreeFromNodes(nodes []kb.OverviewNode, violations []kb.Violation) {
-	childMap := make(map[string][]string)
-	nodeMap := make(map[string]kb.OverviewNode)
-
-	rootNodes := []string{}
+// printTree prints a tree from WalkNode slice (used by treeCmd and overviewCmd).
+// rootTitles lists the top-level titles to print; nodes supplies children and char counts.
+func printTree(nodes []kb.WalkNode, rootTitles []string) {
+	nodeMap := make(map[string]kb.WalkNode)
 	for _, n := range nodes {
 		nodeMap[n.Title] = n
-		if n.Parent == nil {
-			rootNodes = append(rootNodes, n.Title)
-		} else {
-			childMap[*n.Parent] = append(childMap[*n.Parent], n.Title)
-		}
 	}
 
 	var sb strings.Builder
@@ -310,24 +312,44 @@ func printTreeFromNodes(nodes []kb.OverviewNode, violations []kb.Violation) {
 			childPrefix = prefix + "    "
 		}
 
-		children := childMap[title]
-		for i, child := range children {
-			printNode(child, childPrefix, i == len(children)-1)
+		n := nodeMap[title]
+		for i, child := range n.Children {
+			printNode(child, childPrefix, i == len(n.Children)-1)
 		}
 	}
 
-	for i, root := range rootNodes {
+	for i, root := range rootTitles {
 		sb.WriteString(ui.NodeTitle.Render(root) + nodeAnnotation(root) + "\n")
-		children := childMap[root]
-		for j, child := range children {
-			printNode(child, "", j == len(children)-1)
+		n := nodeMap[root]
+		for j, child := range n.Children {
+			printNode(child, "", j == len(n.Children)-1)
 		}
-		if i < len(rootNodes)-1 {
+		if i < len(rootTitles)-1 {
 			sb.WriteString("\n")
 		}
 	}
 
 	fmt.Print(sb.String())
+}
+
+// printTreeFromNodes prints a tree from kb.OverviewNode slice.
+// violations is optional -- printed after the tree.
+func printTreeFromNodes(nodes []kb.OverviewNode, violations []kb.Violation) {
+	// Convert OverviewNodes to WalkNodes for the shared tree printer.
+	var walkNodes []kb.WalkNode
+	var rootTitles []string
+	for _, n := range nodes {
+		walkNodes = append(walkNodes, kb.WalkNode{
+			Title:     n.Title,
+			CharCount: n.CharCount,
+			Children:  n.Children,
+		})
+		if n.Parent == nil {
+			rootTitles = append(rootTitles, n.Title)
+		}
+	}
+
+	printTree(walkNodes, rootTitles)
 
 	if len(violations) > 0 {
 		fmt.Println()
@@ -380,12 +402,49 @@ func completeFunctionNames(cmd *cobra.Command, args []string, toComplete string)
 	return names, cobra.ShellCompDirectiveNoFileComp
 }
 
+// completeTypeNames provides dynamic completion for type name arguments.
+func completeTypeNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	defs, err := sevtypes.ListTypeDefs()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	var names []string
+	for _, td := range defs {
+		names = append(names, td.Name)
+	}
+	return names, cobra.ShellCompDirectiveNoFileComp
+}
+
+// completeTemplateNames provides dynamic completion for template name arguments.
+func completeTemplateNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	fns, err := function.ListDeterministicFunctions()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	var names []string
+	for _, fn := range fns {
+		names = append(names, fn.Name)
+	}
+	return names, cobra.ShellCompDirectiveNoFileComp
+}
+
+// completeBackendNames provides completion for --backend flag values.
+func completeBackendNames(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	return []string{"anthropic", "claude", "codex"}, cobra.ShellCompDirectiveNoFileComp
+}
+
+// noCompletion disables file completion for commands that take no args or fixed args.
+func noCompletion(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	return nil, cobra.ShellCompDirectiveNoFileComp
+}
+
 func syncCmd() *cobra.Command {
 	var root string
 
 	cmd := &cobra.Command{
-		Use:   "sync",
-		Short: "Scan markdown files and rebuild the database",
+		Use:               "sync",
+		Short:             "Scan markdown files and rebuild the database",
+		ValidArgsFunction: noCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// If no root specified, try to find one from cwd. If that fails too,
 			// sync all roots from roots.edn.
@@ -414,8 +473,9 @@ func overviewCmd() *cobra.Command {
 	var ednOutput bool
 
 	cmd := &cobra.Command{
-		Use:   "overview",
-		Short: "Print full tree overview",
+		Use:               "overview",
+		Short:             "Print full tree overview",
+		ValidArgsFunction: noCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resolved, err := resolveRoot(root)
 			if err != nil {
@@ -428,6 +488,8 @@ func overviewCmd() *cobra.Command {
 			}
 			defer stack.Close()
 
+			warnIfStale(resolved)
+
 			nodes, err := stack.KB.Overview(context.Background(), resolved)
 			if err != nil {
 				return fmt.Errorf("building overview: %w", err)
@@ -437,7 +499,11 @@ func overviewCmd() *cobra.Command {
 				return printEDN(nodes)
 			}
 
-			violations, err := stack.KB.Validate(context.Background(), resolved, 9, 0)
+			maxChildren := 9
+			if cfg, cfgErr := projmd.LoadConfig(resolved); cfgErr == nil && cfg.MaxChildren != nil {
+				maxChildren = *cfg.MaxChildren
+			}
+			violations, err := stack.KB.Validate(context.Background(), resolved, maxChildren, 0)
 			if err != nil {
 				return fmt.Errorf("validating: %w", err)
 			}
@@ -454,7 +520,7 @@ func overviewCmd() *cobra.Command {
 
 func walkCmd() *cobra.Command {
 	var root string
-	var depth int
+	var shape string
 	var ednOutput bool
 
 	cmd := &cobra.Command{
@@ -479,7 +545,11 @@ func walkCmd() *cobra.Command {
 			}
 			defer stack.Close()
 
-			w, err := stack.KB.Walk(context.Background(), resolved, nodeTitle)
+			warnIfStale(resolved)
+
+			gather := ResolveGatherSpec(shape)
+
+			w, err := stack.KB.Walk(context.Background(), resolved, nodeTitle, gather)
 			if err != nil {
 				return fmt.Errorf("walking node: %w", err)
 			}
@@ -488,22 +558,86 @@ func walkCmd() *cobra.Command {
 				return printEDN(w)
 			}
 
-			fmt.Print(ui.FormatNodeHeader(
-				w.Title, w.Parent, w.Role,
-				w.Children, w.Siblings,
-				w.ChildRoles, w.SiblingRoles,
-				w.CrossRefs,
-			))
-			fmt.Println(ui.RenderMarkdownOrPlain(w.Content))
-
+			printWalkResult(w, gather)
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&root, "root", "", "Root directory")
-	cmd.Flags().IntVar(&depth, "depth", 1, "Depth of walk")
+	cmd.Flags().StringVar(&shape, "shape", "sevens/neighborhood", "Walk shape: sevens/minimal, sevens/neighborhood, sevens/children, sevens/subtree (sevens/ prefix optional)")
 	cmd.Flags().BoolVar(&ednOutput, "edn", false, "Output in EDN format")
 	return cmd
+}
+
+func printWalkResult(w *kb.WalkResult, gather kb.GatherSpec) {
+	// Header: title, parent, relationships.
+	var childTitles, sibTitles []string
+	childRoles := map[string]string{}
+	sibRoles := map[string]string{}
+	for _, c := range w.Children {
+		childTitles = append(childTitles, c.Title)
+	}
+	for _, s := range w.Siblings {
+		sibTitles = append(sibTitles, s.Title)
+	}
+	if w.ChildRoles != nil {
+		childRoles = w.ChildRoles
+	}
+	if w.SiblingRoles != nil {
+		sibRoles = w.SiblingRoles
+	}
+
+	var parentTitle *string
+	if w.Parent != nil {
+		parentTitle = &w.Parent.Title
+	}
+
+	fmt.Print(ui.FormatNodeHeader(
+		w.Target.Title, parentTitle, w.Target.Role,
+		childTitles, sibTitles,
+		childRoles, sibRoles,
+		w.CrossRefs,
+	))
+	fmt.Println(ui.RenderMarkdownOrPlain(w.Target.Content))
+
+	// Children content.
+	if (gather.Children || gather.Subtree) && len(w.Children) > 0 {
+		for _, child := range w.Children {
+			if child.Content == "" {
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "\n%s %s\n",
+				ui.Dim.Render("───"),
+				ui.Label.Render(child.Title))
+			if child.CharCount > 0 {
+				fmt.Fprintf(os.Stderr, "%s\n", ui.Dim.Render(fmt.Sprintf("(%d chars)", child.CharCount)))
+			}
+			fmt.Println(ui.RenderMarkdownOrPlain(child.Content))
+		}
+	}
+
+	// Sibling content.
+	if gather.Siblings && len(w.Siblings) > 0 {
+		for _, sib := range w.Siblings {
+			if sib.Content == "" {
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "\n%s %s %s\n",
+				ui.Dim.Render("───"),
+				ui.Label.Render(sib.Title),
+				ui.Dim.Render("(sibling)"))
+			fmt.Println(ui.RenderMarkdownOrPlain(sib.Content))
+		}
+	}
+
+	// Parent content.
+	if gather.Parent && w.Parent != nil && w.Parent.Content != "" {
+		fmt.Fprintf(os.Stderr, "\n%s %s %s\n",
+			ui.Dim.Render("───"),
+			ui.Label.Render(w.Parent.Title),
+			ui.Dim.Render("(parent)"))
+		fmt.Println(ui.RenderMarkdownOrPlain(w.Parent.Content))
+	}
 }
 
 func treeCmd() *cobra.Command {
@@ -532,45 +666,18 @@ func treeCmd() *cobra.Command {
 			}
 			defer stack.Close()
 
-			if subj := stack.KB.Resolve(context.Background(), resolved, nodeTitle); subj == "" {
-				return fmt.Errorf("node not found: %s", nodeTitle)
-			}
+			warnIfStale(resolved)
 
-			// Get full overview and filter to subtree for display
-			nodes, err := stack.KB.Overview(context.Background(), resolved)
+			w, err := stack.KB.Walk(context.Background(), resolved, nodeTitle, kb.GatherSubtree)
 			if err != nil {
-				return fmt.Errorf("building overview: %w", err)
+				return fmt.Errorf("walking subtree: %w", err)
 			}
 
-			childMap := make(map[string][]string)
-			for _, n := range nodes {
-				if n.Parent != nil {
-					childMap[*n.Parent] = append(childMap[*n.Parent], n.Title)
-				}
+			if ednOutput {
+				return printEDN(w)
 			}
 
-			var printNode func(title, prefix string, isLast bool)
-			printNode = func(title, prefix string, isLast bool) {
-				connector := "├── "
-				if isLast {
-					connector = "└── "
-				}
-				fmt.Print(prefix + ui.Dim.Render(connector) + ui.NodeTitle.Render(title) + "\n")
-				childPrefix := prefix + "│   "
-				if isLast {
-					childPrefix = prefix + "    "
-				}
-				children := childMap[title]
-				for i, child := range children {
-					printNode(child, childPrefix, i == len(children)-1)
-				}
-			}
-
-			fmt.Println(ui.NodeTitle.Render(nodeTitle))
-			children := childMap[nodeTitle]
-			for i, child := range children {
-				printNode(child, "", i == len(children)-1)
-			}
+			printTree(w.SubtreeNodes, []string{nodeTitle})
 			return nil
 		},
 	}
@@ -771,23 +878,33 @@ func inboxCmd() *cobra.Command {
 			}
 			defer stack.Close()
 
-			items, err := stack.KB.ChildrenSummary(context.Background(), resolved, nodeTitle)
+			warnIfStale(resolved)
+
+			w, err := stack.KB.Walk(context.Background(), resolved, nodeTitle, kb.GatherChildren)
 			if err != nil {
-				return err
+				return fmt.Errorf("walking children: %w", err)
 			}
 
 			fmt.Println(ui.NodeTitle.Render(nodeTitle))
 			fmt.Println(ui.Separator.Render(strings.Repeat("─", 60)))
-			if len(items) == 0 {
+			if len(w.Children) == 0 {
 				fmt.Println(ui.Dim.Render("No child notes"))
 				return nil
 			}
-			for _, item := range items {
-				detail := fmt.Sprintf("%d chars", item.CharCount)
-				if item.Empty {
+
+			// Sort children alphabetically for stable display.
+			sorted := make([]kb.WalkNode, len(w.Children))
+			copy(sorted, w.Children)
+			sort.Slice(sorted, func(i, j int) bool {
+				return strings.ToLower(sorted[i].Title) < strings.ToLower(sorted[j].Title)
+			})
+
+			for _, child := range sorted {
+				detail := fmt.Sprintf("%d chars", child.CharCount)
+				if strings.TrimSpace(child.Content) == "" {
 					detail = "empty"
 				}
-				fmt.Printf("  %s  %s\n", ui.NodeTitle.Render(item.Title), ui.Dim.Render("("+detail+")"))
+				fmt.Printf("  %s  %s\n", ui.NodeTitle.Render(child.Title), ui.Dim.Render("("+detail+")"))
 			}
 			return nil
 		},
@@ -857,13 +974,31 @@ func extractBlockCmd() *cobra.Command {
 			selected := projmd.SelectExtractedBlocks(blocks, idx)
 			content := projmd.RenderExtractedContent(sourceTitle, block, selected)
 
+			// Build the text to remove from the source file using exact
+			// byte offsets recorded during parsing. This avoids the
+			// round-trip through RenderBlockMarkdown which can produce
+			// text that doesn't match the original source (e.g. soft
+			// line breaks flattened to spaces).
+			removeText := projmd.SourceRangeText(body, selected)
+
 			proj := openProjection(stack)
-			projOps := []projection.FileOp{{
-				Action:  "create",
-				Title:   strings.TrimSpace(newTitle),
-				Parent:  parent,
-				Content: "# " + strings.TrimSpace(newTitle) + "\n\n" + content,
-			}}
+			projOps := []projection.FileOp{
+				{
+					Action:  "create",
+					Title:   strings.TrimSpace(newTitle),
+					Parent:  parent,
+					Content: "# " + strings.TrimSpace(newTitle) + "\n\n" + content,
+				},
+			}
+			// Add an edit op to remove the extracted section from the source
+			if removeText != "" {
+				projOps = append(projOps, projection.FileOp{
+					Action:  "edit",
+					File:    sourceTitle,
+					OldText: removeText,
+					NewText: "",
+				})
+			}
 			projResult, err := proj.ApplyOps(context.Background(), resolved, projOps)
 			if err != nil {
 				return fmt.Errorf("creating node: %w", err)
@@ -871,8 +1006,9 @@ func extractBlockCmd() *cobra.Command {
 			for _, f := range projResult.FilesCreated {
 				fmt.Fprintf(os.Stderr, "%s Created: %s\n", ui.Success.Render("[extract]"), f)
 			}
-			if projmd.IsGitRepo(resolved) && len(projResult.FilesCreated) > 0 {
-				hash, err := projmd.CommitFiles(resolved, fmt.Sprintf("sevens: extract block %s from %q", blockPath, sourceTitle), projResult.FilesCreated)
+			allFiles := append(projResult.FilesCreated, projResult.FilesEdited...)
+			if projmd.IsGitRepo(resolved) && len(allFiles) > 0 {
+				hash, err := projmd.CommitFiles(resolved, fmt.Sprintf("sevens: extract block %s from %q", blockPath, sourceTitle), allFiles)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "%s git commit failed: %v\n", ui.Success.Render("[extract]"), err)
 				} else {
@@ -890,8 +1026,9 @@ func extractBlockCmd() *cobra.Command {
 
 func rootsCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "roots",
-		Short: "List all registered sevens roots",
+		Use:               "roots",
+		Short:             "List all registered sevens roots",
+		ValidArgsFunction: noCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			roots, err := config.LoadRoots()
 			if err != nil {
@@ -960,8 +1097,9 @@ func summarizeOutput(outputType, llmOutput string, ops []function.FileOp) string
 
 func functionsCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "functions",
-		Short: "List available functions",
+		Use:               "functions",
+		Short:             "List available functions",
+		ValidArgsFunction: noCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			functions, err := function.ListFunctionDefs()
 			if err != nil {
@@ -973,32 +1111,212 @@ func functionsCmd() *cobra.Command {
 				return nil
 			}
 
-			maxLen := 0
 			for _, fn := range functions {
-				if len(fn.Name) > maxLen {
-					maxLen = len(fn.Name)
-				}
-			}
-
-			for _, fn := range functions {
-				padding := strings.Repeat(" ", maxLen-len(fn.Name))
-				fmt.Fprintf(os.Stdout, "%s%s  %s\n", ui.Label.Render(fn.Name), padding, ui.Dim.Render(fn.Description))
+				sig := function.FormatSignature(&fn)
+				fmt.Fprintf(os.Stdout, "%s  %s\n",
+					sig,
+					ui.Dim.Render(fn.Description))
 			}
 			return nil
 		},
 	}
 }
 
+func typesCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:               "types",
+		Short:             "List all defined types",
+		ValidArgsFunction: noCompletion,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			defs, err := sevtypes.ListTypeDefs()
+			if err != nil {
+				return fmt.Errorf("listing types: %w", err)
+			}
+			if len(defs) == 0 {
+				fmt.Fprintln(os.Stderr, "No types defined")
+				return nil
+			}
+			maxLen := 0
+			for _, td := range defs {
+				if len(td.Name) > maxLen {
+					maxLen = len(td.Name)
+				}
+			}
+			// Build a map of type → producing/consuming functions.
+			producedBy := map[string][]string{}
+			consumedBy := map[string][]string{}
+			if fns, fErr := function.ListFunctionDefs(); fErr == nil {
+				for _, fn := range fns {
+					for _, step := range fn.EffectiveSteps() {
+						outPrim := function.PrimitiveTypeName(step.Output.Shape)
+						outType := step.Output.TypeName
+						if outType != "" {
+							producedBy[outType] = append(producedBy[outType], fn.Name)
+						}
+						producedBy[outPrim] = append(producedBy[outPrim], fn.Name)
+
+						for _, r := range step.Requires {
+							consumedBy[r.Role] = append(consumedBy[r.Role], fn.Name)
+						}
+					}
+				}
+			}
+
+			for _, td := range defs {
+				padding := strings.Repeat(" ", maxLen-len(td.Name))
+				desc := ""
+				if td.Primitive {
+					desc = "(primitive)"
+				} else {
+					parts := []string{}
+					if td.Extends != "" {
+						parts = append(parts, "extends "+td.Extends)
+					}
+					if len(td.Predicates.Required) > 0 {
+						parts = append(parts, fmt.Sprintf("required: %v", td.Predicates.Required))
+					}
+					if len(td.Predicates.Optional) > 0 {
+						parts = append(parts, fmt.Sprintf("optional: %v", td.Predicates.Optional))
+					}
+					desc = strings.Join(parts, "  ")
+				}
+				fmt.Fprintf(os.Stdout, "%s%s  %s\n", ui.Label.Render(td.Name), padding, ui.Dim.Render(desc))
+
+				if fns := producedBy[td.Name]; len(fns) > 0 {
+					fmt.Fprintf(os.Stdout, "%s%s  %s\n", strings.Repeat(" ", maxLen+2), padding, ui.Dim.Render("produced by: "+strings.Join(dedup(fns), ", ")))
+				}
+			}
+			return nil
+		},
+	}
+
+	checkCmd := &cobra.Command{
+		Use:               "check <node-title>",
+		Short:             "Check what types a node conforms to",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeNodeTitles,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			nodeTitle, err := resolveNodeTitle(args[0])
+			if err != nil {
+				return err
+			}
+
+			root, err := resolveRoot("")
+			if err != nil {
+				return fmt.Errorf("resolving root: %w", err)
+			}
+
+			stack, err := openKB()
+			if err != nil {
+				return err
+			}
+			defer stack.Close()
+
+			// Sync to get current state.
+			proj := projmd.New(stack.KB)
+			if _, err := proj.Sync(context.Background(), root); err != nil {
+				return fmt.Errorf("sync: %w", err)
+			}
+
+			subject := kb.NodeSubject(root, nodeTitle)
+			if stack.KB.Resolve(context.Background(), root, nodeTitle) == "" {
+				return fmt.Errorf("node %q not found", nodeTitle)
+			}
+
+			allTypes, err := sevtypes.LoadAllTypeDefs()
+			if err != nil {
+				return fmt.Errorf("loading types: %w", err)
+			}
+			if len(allTypes) == 0 {
+				fmt.Fprintln(os.Stderr, "No types defined")
+				return nil
+			}
+
+			results, err := sevtypes.InferTypes(context.Background(), stack.KB, subject, allTypes)
+			if err != nil {
+				return fmt.Errorf("checking types: %w", err)
+			}
+
+			for _, r := range results {
+				status := "CONFORMS"
+				if !r.Conforms {
+					status = "no"
+				}
+				fmt.Fprintf(os.Stdout, "%s  %s\n", ui.Label.Render(r.TypeName), ui.Dim.Render(status))
+				if len(r.Present) > 0 {
+					fmt.Fprintf(os.Stdout, "  present:  %s\n", strings.Join(r.Present, ", "))
+				}
+				if len(r.Missing) > 0 {
+					fmt.Fprintf(os.Stdout, "  missing:  %s\n", strings.Join(r.Missing, ", "))
+				}
+				if !r.StructureOK {
+					fmt.Fprintf(os.Stdout, "  structure: FAIL\n")
+				}
+			}
+			return nil
+		},
+	}
+
+	nodesCmd := &cobra.Command{
+		Use:               "nodes <type-name>",
+		Short:             "Find all nodes conforming to a type",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeTypeNames,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			typeName := args[0]
+
+			root, err := resolveRoot("")
+			if err != nil {
+				return fmt.Errorf("resolving root: %w", err)
+			}
+
+			stack, err := openKB()
+			if err != nil {
+				return err
+			}
+			defer stack.Close()
+
+			proj := projmd.New(stack.KB)
+			if _, err := proj.Sync(context.Background(), root); err != nil {
+				return fmt.Errorf("sync: %w", err)
+			}
+
+			td, err := sevtypes.LoadTypeDef(typeName)
+			if err != nil {
+				return err
+			}
+
+			titles, err := sevtypes.FindConformingNodes(context.Background(), stack.KB, root, td)
+			if err != nil {
+				return fmt.Errorf("finding nodes: %w", err)
+			}
+
+			if len(titles) == 0 {
+				fmt.Fprintf(os.Stderr, "No nodes conform to type %q\n", typeName)
+				return nil
+			}
+			for _, t := range titles {
+				fmt.Fprintln(os.Stdout, t)
+			}
+			return nil
+		},
+	}
+
+	cmd.AddCommand(checkCmd, nodesCmd)
+	return cmd
+}
+
 func discussCmd() *cobra.Command {
 	var root string
 	var dryRun bool
+	var interactive bool
 	var yes bool
 	var model string
 	var backendFlag string
 
 	cmd := &cobra.Command{
 		Use:               "discuss <node-title>",
-		Short:             "Run the discuss function for a node",
+		Short:             "Start or continue a discussion on a node",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeNodeTitles,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -1012,11 +1330,6 @@ func discussCmd() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			fn, _, err := function.LoadFunction("discuss")
-			if err != nil {
-				return fmt.Errorf("loading function: %w", err)
-			}
-
 			stack, serr := openKB()
 			if serr != nil {
 				return fmt.Errorf("opening KB: %w", serr)
@@ -1024,6 +1337,10 @@ func discussCmd() *cobra.Command {
 			defer stack.Close()
 
 			if dryRun {
+				fn, _, err := function.LoadFunction("discuss")
+				if err != nil {
+					return fmt.Errorf("loading function: %w", err)
+				}
 				steps := fn.EffectiveSteps()
 				if len(steps) == 0 {
 					return fmt.Errorf("discuss function has no steps")
@@ -1053,19 +1370,64 @@ func discussCmd() *cobra.Command {
 			}
 			fmt.Fprintf(os.Stderr, "[backend] %s\n", be.Name())
 
-			exec := buildExecutor(stack, be)
-			result, err := exec.Apply(context.Background(), resolved, fn, nodeTitle)
-			if err != nil {
-				return fmt.Errorf("applying discuss: %w", err)
+			deps := buildDeps(stack, be)
+
+			if !interactive {
+				// Single-turn: just run the discuss function via workflow.
+				result, err := workflow.ApplyFunction(ctx(), deps, resolved, "discuss", nodeTitle)
+				if err != nil {
+					return fmt.Errorf("applying discuss: %w", err)
+				}
+				displayWorkflowApplyResult(result)
+				return nil
 			}
 
-			displayApplyResult(result, fn, nodeTitle)
+			// Multi-turn interactive mode via stdin.
+			state, agentOutput, err := workflow.StartDiscussion(ctx(), deps, resolved, nodeTitle)
+			if err != nil {
+				return fmt.Errorf("starting discussion: %w", err)
+			}
+			if agentOutput != "" {
+				fmt.Println(agentOutput)
+			}
+
+			scanner := bufio.NewScanner(os.Stdin)
+			fmt.Fprint(os.Stderr, "[you]> ")
+			for scanner.Scan() {
+				line := scanner.Text()
+				if line == ".end" || line == ".done" {
+					break
+				}
+				if line == ".cancel" {
+					_ = workflow.CancelDiscussion(ctx(), deps, resolved, state)
+					fmt.Fprintln(os.Stderr, "discussion discarded")
+					return nil
+				}
+				output, err := workflow.ContinueDiscussion(ctx(), deps, resolved, state, line)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[error] %v\n", err)
+					continue
+				}
+				if output != "" {
+					fmt.Println(output)
+				}
+				fmt.Fprint(os.Stderr, "[you]> ")
+			}
+
+			hash, err := workflow.EndDiscussion(ctx(), deps, resolved, state)
+			if err != nil {
+				return fmt.Errorf("ending discussion: %w", err)
+			}
+			if hash != "" {
+				fmt.Fprintf(os.Stderr, "[discuss] saved (%s)\n", hash)
+			}
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&root, "root", "", "Root directory")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print rendered prompt without calling LLM")
+	cmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "Multi-turn interactive mode (reads from stdin)")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip cost confirmation")
 	cmd.Flags().StringVar(&model, "model", "", "Model name or profile to use")
 	cmd.Flags().StringVar(&backendFlag, "backend", "", "Inference backend")
@@ -1077,9 +1439,10 @@ func defineCmd() *cobra.Command {
 	var prompt string
 
 	cmd := &cobra.Command{
-		Use:   "define <name>",
-		Short: "Define a new function",
-		Args:  cobra.ExactArgs(1),
+		Use:               "define <name>",
+		Short:             "Define a new function",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: noCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 
@@ -1175,7 +1538,7 @@ func focusCmd() *cobra.Command {
 			}
 			defer stack.Close()
 
-			w, err := stack.KB.Walk(context.Background(), resolved, nodeTitle)
+			w, err := stack.KB.Walk(context.Background(), resolved, nodeTitle, kb.GatherNeighborhood)
 			if err != nil {
 				return fmt.Errorf("walking node: %w", err)
 			}
@@ -1185,15 +1548,23 @@ func focusCmd() *cobra.Command {
 				return fmt.Errorf("saving session: %w", err)
 			}
 
-			fmt.Fprintf(os.Stderr, "%s %s\n", ui.Success.Render("[focus]"), ui.NodeTitle.Render(w.Title))
+			fmt.Fprintf(os.Stderr, "%s %s\n", ui.Success.Render("[focus]"), ui.NodeTitle.Render(w.Target.Title))
 			if w.Parent != nil {
-				fmt.Fprintf(os.Stderr, "%s%s\n", ui.Dim.Render("  parent: "), *w.Parent)
+				fmt.Fprintf(os.Stderr, "%s%s\n", ui.Dim.Render("  parent: "), w.Parent.Title)
 			}
 			if len(w.Children) > 0 {
-				fmt.Fprintf(os.Stderr, "%s%s\n", ui.Dim.Render("  children: "), strings.Join(w.Children, ", "))
+				var ct []string
+				for _, c := range w.Children {
+					ct = append(ct, c.Title)
+				}
+				fmt.Fprintf(os.Stderr, "%s%s\n", ui.Dim.Render("  children: "), strings.Join(ct, ", "))
 			}
 			if len(w.Siblings) > 0 {
-				fmt.Fprintf(os.Stderr, "%s%s\n", ui.Dim.Render("  siblings: "), strings.Join(w.Siblings, ", "))
+				var st []string
+				for _, s := range w.Siblings {
+					st = append(st, s.Title)
+				}
+				fmt.Fprintf(os.Stderr, "%s%s\n", ui.Dim.Render("  siblings: "), strings.Join(st, ", "))
 			}
 			if len(includes) > 0 {
 				fmt.Fprintf(os.Stderr, "%s%s\n", ui.Dim.Render("  includes: "), strings.Join(includes, ", "))
@@ -1211,8 +1582,9 @@ func focusCmd() *cobra.Command {
 
 func unfocusCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "unfocus",
-		Short: "Clear the active focus session",
+		Use:               "unfocus",
+		Short:             "Clear the active focus session",
+		ValidArgsFunction: noCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			stack, err := openKB()
 			if err != nil {
@@ -1236,8 +1608,9 @@ func unfocusCmd() *cobra.Command {
 
 func statusCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "status",
-		Short: "Show current focus session and pending state",
+		Use:               "status",
+		Short:             "Show current focus session and pending state",
+		ValidArgsFunction: noCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			stack, err := openKB()
 			if err != nil {
@@ -1325,12 +1698,14 @@ func logCmd() *cobra.Command {
 
 func queryCmd() *cobra.Command {
 	var root string
+	var allRoots bool
 
 	cmd := &cobra.Command{
-		Use:   "query <sql>",
-		Short: "Run a SQL query against the triples store",
-		Long:  "Execute a SQL query against the triples table. Template variables {{root}} and {{target}} (from focus session) are substituted.",
-		Args:  cobra.ExactArgs(1),
+		Use:               "query <sql>",
+		Short:             "Run a SQL query against the triples store",
+		Long:              "Execute a SQL query against the triples table. Template variables {{root}}, {{target}} (from focus session), and {{root-hash}} are substituted. Results are scoped to the current root by default; use --all to query across all roots.",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: noCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resolved, err := resolveRoot(root)
 			if err != nil {
@@ -1343,8 +1718,11 @@ func queryCmd() *cobra.Command {
 			}
 			defer stack.Close()
 
+			hash := kb.RootHash(resolved)
+
 			bindings := map[string]string{
-				"root": resolved,
+				"root":      resolved,
+				"root-hash": hash,
 			}
 
 			// Also bind focus session if active
@@ -1360,6 +1738,17 @@ func queryCmd() *cobra.Command {
 				placeholder := "{{" + k + "}}"
 				escaped := strings.ReplaceAll(v, "'", "''")
 				query = strings.ReplaceAll(query, placeholder, "'"+escaped+"'")
+			}
+
+			// Scope to current root by default using an inline subquery so we
+			// avoid a self-referencing CTE ("WITH triples AS (SELECT * FROM triples ...)")
+			// which SQLite rejects as a circular reference.
+			if !allRoots {
+				scopeFilter := fmt.Sprintf(
+					"(SELECT * FROM triples WHERE subject LIKE 'node:%s:%%' OR subject LIKE 'block:%s:%%' OR subject LIKE 'fn:%s:%%' OR subject LIKE 'step:%s:%%' OR predicate LIKE 'session/%%' OR predicate LIKE 'log/%%')",
+					hash, hash, hash, hash)
+				re := regexp.MustCompile(`(?i)\bFROM\s+triples\b`)
+				query = re.ReplaceAllString(query, "FROM "+scopeFilter+" AS triples")
 			}
 
 			results, err := stack.Store.RawQuery(context.Background(), query)
@@ -1424,6 +1813,7 @@ func queryCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&root, "root", "", "Root directory")
+	cmd.Flags().BoolVar(&allRoots, "all", false, "Query across all roots (default: scope to current root)")
 	return cmd
 }
 
@@ -1431,9 +1821,10 @@ func searchCmd() *cobra.Command {
 	var root string
 
 	cmd := &cobra.Command{
-		Use:   "search <query>",
-		Short: "Search node titles and content",
-		Args:  cobra.ExactArgs(1),
+		Use:               "search <query>",
+		Short:             "Search node titles and content",
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: noCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resolved, err := resolveRoot(root)
 			if err != nil {
@@ -1657,6 +2048,8 @@ func prepareCmd() *cobra.Command {
 			}
 			defer stack.Close()
 
+			warnIfStale(resolved)
+
 			// Use new context resolution
 			steps := fn.EffectiveSteps()
 			prepSteps := make([]ui.PrepareStep, len(steps))
@@ -1675,7 +2068,7 @@ func prepareCmd() *cobra.Command {
 			}
 
 			// Walk the target for context display
-			walkCtx, walkErr := stack.KB.Walk(context.Background(), resolved, nodeTitle)
+			walkCtx, walkErr := stack.KB.Walk(context.Background(), resolved, nodeTitle, kb.GatherNeighborhood)
 			if walkErr != nil {
 				return fmt.Errorf("walking node: %w", walkErr)
 			}
@@ -1711,13 +2104,26 @@ func prepareCmd() *cobra.Command {
 			allContextFiles = append(allContextFiles, globalConfig.ContextFiles...)
 			allContextFiles = append(allContextFiles, oldFn.ContextFiles...)
 
+			// Extract parent title, child titles, sibling titles from WalkResult
+			var walkParent *string
+			if walkCtx.Parent != nil {
+				walkParent = &walkCtx.Parent.Title
+			}
+			var walkChildren, walkSiblings []string
+			for _, c := range walkCtx.Children {
+				walkChildren = append(walkChildren, c.Title)
+			}
+			for _, s := range walkCtx.Siblings {
+				walkSiblings = append(walkSiblings, s.Title)
+			}
+
 			fmt.Print(ui.RenderPrepareChecklist(ui.PrepareData{
 				FnName:       fnName,
 				NodeTitle:    nodeTitle,
 				Steps:        prepSteps,
-				Parent:       walkCtx.Parent,
-				Siblings:     walkCtx.Siblings,
-				Children:     walkCtx.Children,
+				Parent:       walkParent,
+				Siblings:     walkSiblings,
+				Children:     walkChildren,
 				NeedsParent:  needsParent,
 				NeedsSibling: needsSiblings,
 				NeedsChild:   needsChildren,
@@ -1740,6 +2146,7 @@ func submitCmd() *cobra.Command {
 	var outputType string
 	var response string
 	var responseFile string
+	var pipelineID string
 
 	cmd := &cobra.Command{
 		Use:               "submit <node-title>",
@@ -1756,9 +2163,8 @@ func submitCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("resolving root: %w", err)
 			}
-			_ = resolved
 
-			// Get the response text
+			// Get the response text.
 			responseText := response
 			if responseFile != "" {
 				data, err := os.ReadFile(responseFile)
@@ -1777,27 +2183,9 @@ func submitCmd() *cobra.Command {
 			}
 			defer stack.Close()
 
-			// Determine step name and index
-			if stepName == "" {
-				stepName = "default"
-			}
-			stepIndex := 0
-			if fn, _, err := function.LoadFunction(fnName); err == nil {
-				steps := fn.EffectiveSteps()
-				for i, s := range steps {
-					if s.Name == stepName {
-						stepIndex = i
-						break
-					}
-				}
-			}
+			deps := buildDeps(stack, nil)
 
-			// Create a pipeline in Pending state for the submitted result
-			ps := function.NewPipelineStore(stack.Store)
-			p := function.NewPipeline(resolved, fnName, nodeTitle)
-			p.CurrentStep = stepIndex
-
-			// Build the transform result from the submitted response
+			// Build the transform result from the submitted response.
 			var tfResult function.TransformResult
 			tfResult.Raw = responseText
 
@@ -1808,69 +2196,75 @@ func submitCmd() *cobra.Command {
 					return fmt.Errorf("parsing ops response: %w", parseErr)
 				}
 				tfResult.Ops = ops
+			case "suggestions":
+				tfResult.IsText = true
+			case "text":
+				tfResult.IsText = true
+			default:
+				return fmt.Errorf("unknown output type: %q (use ops, suggestions, or text)", outputType)
+			}
 
-				// Suspend in Pending phase
-				p.CurrentResult = &tfResult
-				p.Phase = function.PhasePending
-				if err := ps.Save(context.Background(), p); err != nil {
-					return fmt.Errorf("saving pipeline: %w", err)
+			// Check for existing pending pipeline.
+			if pipelineID != "" {
+				// Inject result into existing pipeline.
+				if err := workflow.SubmitExternalResult(ctx(), deps, pipelineID, tfResult); err != nil {
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "[submit] injected result into pipeline %s\n", pipelineID)
+			} else {
+				// Create a new pipeline with the result pre-loaded.
+				p := function.NewPipeline(resolved, fnName, nodeTitle)
+				p.BackendName = "agent"
+
+				// Determine step index from step name.
+				if stepName == "" {
+					stepName = "default"
+				}
+				if fn, _, err := function.LoadFunction(fnName); err == nil {
+					steps := fn.EffectiveSteps()
+					for i, s := range steps {
+						if s.Name == stepName {
+							p.CurrentStep = i
+							break
+						}
+					}
 				}
 
-				// Log via new KB system
-				stack.KB.AppendLog(context.Background(), kb.LogEntry{
-					Event:     "suggested",
+				p.CurrentResult = &tfResult
+				if outputType == "text" {
+					p.Phase = function.PhaseCompleted
+				} else {
+					p.Phase = function.PhasePending
+				}
+				if err := deps.Store.Save(ctx(), p); err != nil {
+					return fmt.Errorf("saving pipeline: %w", err)
+				}
+				pipelineID = p.ID
+
+				_ = deps.KB.AppendLog(ctx(), kb.LogEntry{
+					Event:     "submitted",
 					Root:      resolved,
 					Function:  fnName,
 					Node:      nodeTitle,
 					Step:      stepName,
 					Timestamp: time.Now().UTC().Format(time.RFC3339),
-					Result:    summarizeOutput("ops", responseText, ops),
 				})
+			}
 
-				fmt.Fprintf(os.Stderr, "[submit] %s/%s → %q (pipeline %s)\n", fnName, stepName, nodeTitle, p.ID)
-				for _, op := range ops {
+			// Display result.
+			switch outputType {
+			case "ops":
+				fmt.Fprintf(os.Stderr, "[submit] %s/%s → %q (pipeline %s)\n", fnName, stepName, nodeTitle, pipelineID)
+				for _, op := range tfResult.Ops {
 					fmt.Fprintln(os.Stderr, ui.FormatOp(op.Action, opName(op)))
 				}
 				fmt.Fprintf(os.Stderr, "\nRun `sevens accept %q` to apply.\n", nodeTitle)
-
 			case "suggestions":
-				tfResult.IsText = true
-				p.CurrentResult = &tfResult
-				p.Phase = function.PhasePending
-				if err := ps.Save(context.Background(), p); err != nil {
-					return fmt.Errorf("saving pipeline: %w", err)
-				}
-
-				summary := summarizeOutput("suggestions", responseText, nil)
-				stack.KB.AppendLog(context.Background(), kb.LogEntry{
-					Event: "suggested", Root: resolved, Function: fnName,
-					Node: nodeTitle, Step: stepName,
-					Timestamp: time.Now().UTC().Format(time.RFC3339),
-					Result: summary,
-				})
-
-				fmt.Fprintf(os.Stderr, "[submit] %s/%s → %q (%s, pipeline %s)\n", fnName, stepName, nodeTitle, summary, p.ID)
+				fmt.Fprintf(os.Stderr, "[submit] %s/%s → %q (pipeline %s)\n", fnName, stepName, nodeTitle, pipelineID)
 				fmt.Fprintf(os.Stderr, "\nRun `sevens accept %q` to approve and continue.\n", nodeTitle)
-
 			case "text":
-				tfResult.IsText = true
-				p.CurrentResult = &tfResult
-				p.Phase = function.PhaseCompleted
-				if err := ps.Save(context.Background(), p); err != nil {
-					return fmt.Errorf("saving pipeline: %w", err)
-				}
-
-				stack.KB.AppendLog(context.Background(), kb.LogEntry{
-					Event: "completed", Root: resolved, Function: fnName,
-					Node: nodeTitle, Step: stepName,
-					Timestamp: time.Now().UTC().Format(time.RFC3339),
-				})
-
 				fmt.Fprintf(os.Stderr, "[submit] %s/%s → %q (completed)\n", fnName, stepName, nodeTitle)
 				fmt.Println(responseText)
-
-			default:
-				return fmt.Errorf("unknown output type: %q (use ops, suggestions, or text)", outputType)
 			}
 
 			return nil
@@ -1883,6 +2277,7 @@ func submitCmd() *cobra.Command {
 	cmd.Flags().StringVar(&outputType, "output", "", "Output type: ops, suggestions, or text")
 	cmd.Flags().StringVar(&response, "response", "", "Response text (inline)")
 	cmd.Flags().StringVar(&responseFile, "response-file", "", "Path to file containing response")
+	cmd.Flags().StringVar(&pipelineID, "pipeline", "", "Existing pipeline ID to inject result into")
 	cmd.MarkFlagRequired("function")
 	cmd.MarkFlagRequired("output")
 	return cmd
@@ -2008,7 +2403,7 @@ func ensureParentNode(stack *kbStack, root string, parentTitle string, parentTem
 }
 
 // previewDeterministicFunction shows what a deterministic function would do.
-func previewDeterministicFunction(fnName string, vars map[string]string) error {
+func previewDeterministicFunction(fnName string, vars map[string]string, resolvedTarget string) error {
 	fn, _, err := function.LoadFunction(fnName)
 	if err != nil {
 		return err
@@ -2050,7 +2445,11 @@ func previewDeterministicFunction(fnName string, vars map[string]string) error {
 				fmt.Printf("%s %s\n", ui.Dim.Render("bootstrap:"), cfg.ParentTemplate)
 			}
 		case "append-node", "insert-block":
-			fmt.Printf("%s %s\n", ui.Dim.Render("target:"), cfg.Target)
+			displayTarget := cfg.Target
+			if resolvedTarget != "" {
+				displayTarget = resolvedTarget
+			}
+			fmt.Printf("%s %s\n", ui.Dim.Render("target:"), displayTarget)
 			if cfg.Heading != "" {
 				fmt.Printf("%s %s\n", ui.Dim.Render("heading:"), cfg.Heading)
 			}
@@ -2093,8 +2492,9 @@ func addTemplateSemanticVars(varMap map[string]string, values map[string]string)
 
 func templatesCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "templates",
-		Short: "List available templates (deterministic functions)",
+		Use:               "templates",
+		Short:             "List available templates (deterministic functions)",
+		ValidArgsFunction: noCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fns, err := function.ListDeterministicFunctions()
 			if err != nil {
@@ -2121,9 +2521,10 @@ func captureCmd() *cobra.Command {
 	var summaryVar string
 
 	cmd := &cobra.Command{
-		Use:   "capture [title]",
-		Short: "Quick-capture a note with the inbox-capture template",
-		Args:  cobra.MaximumNArgs(1),
+		Use:               "capture [title]",
+		Short:             "Quick-capture a note with the inbox-capture template",
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: noCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resolved, err := resolveRoot(root)
 			if err != nil {
@@ -2161,7 +2562,7 @@ func captureCmd() *cobra.Command {
 				}
 			}
 			if dryRun {
-				return previewDeterministicFunction("inbox-capture", varMap)
+				return previewDeterministicFunction("inbox-capture", varMap, "")
 			}
 			if err := executeDeterministicFunction(stack, resolved, "inbox-capture", resolvedParent, "", varMap); err != nil {
 				return err
@@ -2191,9 +2592,10 @@ func newCmd() *cobra.Command {
 	var textVar string
 
 	cmd := &cobra.Command{
-		Use:   "new [title]",
-		Short: "Create a new node, optionally from a template",
-		Args:  cobra.MaximumNArgs(1),
+		Use:               "new [title]",
+		Short:             "Create a new node, optionally from a template",
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: noCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resolved, err := resolveRoot(root)
 			if err != nil {
@@ -2237,7 +2639,7 @@ func newCmd() *cobra.Command {
 					}
 				}
 				if dryRun {
-					return previewDeterministicFunction(templateName, varMap)
+					return previewDeterministicFunction(templateName, varMap, "")
 				}
 				if err := executeDeterministicFunction(stack, resolved, templateName, resolvedParent, "", varMap); err != nil {
 					return err
@@ -2250,6 +2652,16 @@ func newCmd() *cobra.Command {
 					return fmt.Errorf("provide a title or use --template")
 				}
 				title := args[0]
+				if dryRun {
+					fmt.Println(ui.Label.Render("Node Preview"))
+					fmt.Printf("%s %s\n", ui.Dim.Render("title:"), title)
+					if parent != "" {
+						fmt.Printf("%s %s\n", ui.Dim.Render("parent:"), parent)
+					}
+					slug := strings.ToLower(strings.ReplaceAll(title, " ", "-"))
+					fmt.Printf("%s %s.md\n", ui.Dim.Render("file:"), slug)
+					return nil
+				}
 				content := "# " + title + "\n\n"
 				proj := openProjection(stack)
 				ops := []projection.FileOp{{
@@ -2295,9 +2707,10 @@ func instantiateCmd() *cobra.Command {
 	var textVar string
 
 	cmd := &cobra.Command{
-		Use:   "instantiate <template> [args...]",
-		Short: "Instantiate a template (deterministic function)",
-		Args:  cobra.MinimumNArgs(1),
+		Use:               "instantiate <template> [args...]",
+		Short:             "Instantiate a template (deterministic function)",
+		Args:              cobra.MinimumNArgs(1),
+		ValidArgsFunction: completeTemplateNames,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resolved, err := resolveRoot(root)
 			if err != nil {
@@ -2346,7 +2759,7 @@ func instantiateCmd() *cobra.Command {
 				}
 			}
 			if dryRun {
-				return previewDeterministicFunction(fnName, varMap)
+				return previewDeterministicFunction(fnName, varMap, resolvedTarget)
 			}
 			if err := executeDeterministicFunction(stack, resolved, fnName, resolvedParent, resolvedTarget, varMap); err != nil {
 				return err
@@ -2387,7 +2800,7 @@ func configCmd() *cobra.Command {
 			}
 
 			if len(caps.MCPServers) == 0 {
-				return fmt.Errorf("no MCP servers defined in capabilities.edn")
+				fmt.Fprintln(os.Stderr, "[warn] no MCP servers defined in capabilities.edn — generating empty config")
 			}
 
 			configDir, err := config.ConfigDir()
@@ -2413,8 +2826,9 @@ func configCmd() *cobra.Command {
 	}
 
 	showCmd := &cobra.Command{
-		Use:   "show",
-		Short: "Show current configuration",
+		Use:               "show",
+		Short:             "Show current configuration",
+		ValidArgsFunction: noCompletion,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			globalConfig, err := config.LoadGlobalConfig()
 			if err != nil {
@@ -2449,8 +2863,126 @@ func configCmd() *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(generateCmd, showCmd)
+	initCfgCmd := &cobra.Command{
+		Use:               "init",
+		Short:             "Create a default config.edn if none exists",
+		ValidArgsFunction: noCompletion,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			configDir, err := config.ConfigDir()
+			if err != nil {
+				return err
+			}
+			path := filepath.Join(configDir, "config.edn")
+
+			if _, err := os.Stat(path); err == nil {
+				fmt.Fprintf(os.Stderr, "config already exists: %s\n", path)
+			} else {
+
+			defaultConfig := `;; sevens configuration
+;; ~/.config/sevens/config.edn
+
+{;; --- LLM provider ---
+ :llm {:provider "anthropic"
+       :model "claude-sonnet-4-20250514"
+       :api-key-env "ANTHROPIC_API_KEY"
+       ;; :api-key "sk-..." ;; direct key (takes precedence over api-key-env)
+       }
+
+ ;; --- Named model profiles ---
+ ;; Use with: sevens apply notice "Node" --model fast
+ :models {"fast"     {:model "claude-haiku-4-20250514"}
+          "capable"  {:model "claude-sonnet-4-20250514"}
+          "powerful" {:model "claude-opus-4-20250514"}}
+
+ ;; --- Default backend ---
+ ;; Options: "anthropic" (API), "claude" (CLI subprocess), "codex" (CLI subprocess)
+ :backend "claude"
+
+ ;; --- CLI backends ---
+ ;; Configure after running: sevens config generate claude
+ ;; :backends {"claude" {:type "claude"
+ ;;                      :command "claude"
+ ;;                      :generated-conf-dir "~/.config/sevens/generated/claude"}
+ ;;            "codex"  {:type "codex"
+ ;;                      :command "codex"
+ ;;                      :generated-conf-dir "~/.config/sevens/generated/codex"}}
+
+ ;; --- Cost threshold ---
+ ;; Operations below this USD amount are auto-approved without prompting.
+ ;; Set to 0 to always prompt.
+ :cost-threshold 0.01
+
+ ;; --- Display ---
+ ;; "light" or "dark" for terminal rendering
+ :theme "dark"
+
+ ;; --- Global system prompt ---
+ ;; Prepended to every LLM call.
+ ;; :system-prompt "You are analyzing a personal knowledge graph..."
+
+ ;; --- Context files ---
+ ;; Injected into every AI call. Supports ~ expansion.
+ ;; :context-files ["~/notes/style-guide.md" "~/notes/project-context.md"]
+ }
+`
+				if err := os.WriteFile(path, []byte(defaultConfig), 0644); err != nil {
+					return fmt.Errorf("writing config: %w", err)
+				}
+				fmt.Fprintf(os.Stderr, "created %s\n", path)
+			}
+
+			// Seed default functions (always, skipping existing).
+			fnDir := filepath.Join(configDir, "functions")
+			if err := os.MkdirAll(fnDir, 0755); err != nil {
+				return fmt.Errorf("creating functions dir: %w", err)
+			}
+			seeded, err := seedDefaultFunctions(fnDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[warn] seeding functions: %v\n", err)
+			} else if seeded > 0 {
+				fmt.Fprintf(os.Stderr, "seeded %d function files in %s\n", seeded, fnDir)
+			} else {
+				fmt.Fprintf(os.Stderr, "functions already present in %s\n", fnDir)
+			}
+
+			// Seed default types (always, skipping existing).
+			typesDir := filepath.Join(configDir, "types")
+			if err := os.MkdirAll(typesDir, 0755); err != nil {
+				return fmt.Errorf("creating types dir: %w", err)
+			}
+			seededTypes, err := defaults.SeedTypes(typesDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[warn] seeding types: %v\n", err)
+			} else if seededTypes > 0 {
+				fmt.Fprintf(os.Stderr, "seeded %d type files in %s\n", seededTypes, typesDir)
+			} else {
+				fmt.Fprintf(os.Stderr, "types already present in %s\n", typesDir)
+			}
+
+			return nil
+		},
+	}
+
+	cmd.AddCommand(generateCmd, showCmd, initCfgCmd)
 	return cmd
+}
+
+// seedDefaultFunctions copies bundled function files into the user's functions
+// directory, skipping any that already exist. Returns the count of files written.
+func seedDefaultFunctions(fnDir string) (int, error) {
+	return defaults.SeedFunctions(fnDir)
+}
+
+func dedup(ss []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range ss {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func orDefault(s, def string) string {
@@ -2496,6 +3028,7 @@ func main() {
 		revertCmd(),
 		pendingCmd2(),
 		functionsCmd(),
+		typesCmd(),
 		templatesCmd(),
 		defineCmd(),
 		focusCmd(),
@@ -2509,6 +3042,8 @@ func main() {
 		newCmd(),
 		instantiateCmd(),
 		captureCmd(),
+		exportCmd(),
+		harvestCmd(),
 		configCmd(),
 		replCmd(),
 	)
@@ -2530,55 +3065,66 @@ func main() {
 			fmt.Fprintf(os.Stderr, "  %s\n\n", cmd.UseLine())
 		}
 
-		// Available commands (grouped)
+		// Available commands
 		if cmd.HasAvailableSubCommands() {
 			fmt.Fprintf(os.Stderr, "%s\n", ui.Label.Render("Commands:"))
 
-			// Group commands by category
-			graph := []string{"init", "sync", "overview", "walk", "tree", "blocks", "diff-blocks", "inbox", "extract-block", "roots", "search", "query"}
-			functions := []string{"apply", "accept", "reject", "pending", "functions", "templates", "define", "prepare", "submit"}
-			session := []string{"focus", "unfocus", "status", "log"}
-			structure := []string{"new", "capture", "revert"}
+			// Only use grouped layout for the root command.
+			if cmd == rootCmd {
+				graph := []string{"init", "sync", "overview", "walk", "tree", "blocks", "diff-blocks", "inbox", "extract-block", "roots", "search", "query"}
+				functions := []string{"apply", "discuss", "accept", "reject", "pending", "functions", "types", "templates", "define", "prepare", "submit", "export", "harvest"}
+				session := []string{"focus", "unfocus", "status", "log"}
+				structure := []string{"new", "capture", "instantiate", "revert"}
 
-			groups := []struct {
-				name string
-				cmds []string
-			}{
-				{"Graph", graph},
-				{"Functions", functions},
-				{"Session", session},
-				{"Structure", structure},
-			}
-
-			allCmds := make(map[string]*cobra.Command)
-			for _, sub := range cmd.Commands() {
-				if !sub.IsAvailableCommand() {
-					continue
+				groups := []struct {
+					name string
+					cmds []string
+				}{
+					{"Graph", graph},
+					{"Functions", functions},
+					{"Session", session},
+					{"Structure", structure},
 				}
-				allCmds[sub.Name()] = sub
-			}
 
-			for _, g := range groups {
-				fmt.Fprintf(os.Stderr, "\n  %s\n", ui.Dim.Render(g.name))
-				for _, name := range g.cmds {
-					if sub, ok := allCmds[name]; ok {
-						fmt.Fprintf(os.Stderr, "    %s  %s\n",
-							ui.Label.Render(fmt.Sprintf("%-12s", sub.Name())),
-							ui.Dim.Render(sub.Short))
-						delete(allCmds, name)
-					}
-				}
-			}
-
-			// Any remaining commands not in a group
-			if len(allCmds) > 0 {
-				fmt.Fprintf(os.Stderr, "\n  %s\n", ui.Dim.Render("Other"))
+				allCmds := make(map[string]*cobra.Command)
 				for _, sub := range cmd.Commands() {
-					if _, ok := allCmds[sub.Name()]; ok {
-						fmt.Fprintf(os.Stderr, "    %s  %s\n",
-							ui.Label.Render(fmt.Sprintf("%-12s", sub.Name())),
-							ui.Dim.Render(sub.Short))
+					if !sub.IsAvailableCommand() {
+						continue
 					}
+					allCmds[sub.Name()] = sub
+				}
+
+				for _, g := range groups {
+					fmt.Fprintf(os.Stderr, "\n  %s\n", ui.Dim.Render(g.name))
+					for _, name := range g.cmds {
+						if sub, ok := allCmds[name]; ok {
+							fmt.Fprintf(os.Stderr, "    %s  %s\n",
+								ui.Label.Render(fmt.Sprintf("%-12s", sub.Name())),
+								ui.Dim.Render(sub.Short))
+							delete(allCmds, name)
+						}
+					}
+				}
+
+				if len(allCmds) > 0 {
+					fmt.Fprintf(os.Stderr, "\n  %s\n", ui.Dim.Render("Other"))
+					for _, sub := range cmd.Commands() {
+						if _, ok := allCmds[sub.Name()]; ok {
+							fmt.Fprintf(os.Stderr, "    %s  %s\n",
+								ui.Label.Render(fmt.Sprintf("%-12s", sub.Name())),
+								ui.Dim.Render(sub.Short))
+						}
+					}
+				}
+			} else {
+				// Flat list for subcommands (config, etc.)
+				for _, sub := range cmd.Commands() {
+					if !sub.IsAvailableCommand() {
+						continue
+					}
+					fmt.Fprintf(os.Stderr, "  %s  %s\n",
+						ui.Label.Render(fmt.Sprintf("%-12s", sub.Name())),
+						ui.Dim.Render(sub.Short))
 				}
 			}
 			fmt.Fprintln(os.Stderr)

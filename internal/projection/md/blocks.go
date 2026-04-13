@@ -29,14 +29,19 @@ func ExtractBlocks(body string) []ParsedBlock {
 		case *gast.Heading:
 			block := newBlock(path, "heading", plainText(n, source))
 			block.Level = n.Level
+			block.SourceStart, block.SourceStop = headingSourceRange(n, source)
 			blocks = append(blocks, block)
 		case *gast.Paragraph:
 			if _, inListItem := node.Parent().(*gast.ListItem); inListItem {
 				break
 			}
-			blocks = append(blocks, newBlock(path, "paragraph", plainText(n, source)))
+			block := newBlock(path, "paragraph", plainText(n, source))
+			block.SourceStart, block.SourceStop = linesSourceRange(n.Lines(), source)
+			blocks = append(blocks, block)
 		case *gast.ListItem:
-			blocks = append(blocks, extractListItemBlock(n, source, path))
+			block := extractListItemBlock(n, source, path)
+			block.SourceStart, block.SourceStop = listItemSourceRange(n, source)
+			blocks = append(blocks, block)
 		}
 
 		i := 0
@@ -52,6 +57,67 @@ func ExtractBlocks(body string) []ParsedBlock {
 		i++
 	}
 	return annotateBlocks(blocks)
+}
+
+// linesSourceRange returns the byte range [start, stop) for a block whose
+// content is described by a set of text segments (e.g. paragraphs). stop is
+// one past the trailing newline if one is present in the source.
+func linesSourceRange(segs *text.Segments, source []byte) (start, stop int) {
+	if segs == nil || segs.Len() == 0 {
+		return 0, 0
+	}
+	start = segs.At(0).Start
+	stop = segs.At(segs.Len() - 1).Stop
+	// stop points at the newline byte; include it.
+	if stop < len(source) && source[stop] == '\n' {
+		stop++
+	}
+	return start, stop
+}
+
+// headingSourceRange returns the byte range [start, stop) for a heading node.
+// Goldmark heading Lines() cover only the text content (after "## "); we walk
+// backward to find the '#' that opens the line.
+func headingSourceRange(n *gast.Heading, source []byte) (start, stop int) {
+	segs := n.Lines()
+	if segs == nil || segs.Len() == 0 {
+		return 0, 0
+	}
+	contentStart := segs.At(0).Start
+	// Walk backward past the heading text prefix "# " to find the opening '#'.
+	lineStart := contentStart
+	for lineStart > 0 && source[lineStart-1] != '\n' {
+		lineStart--
+	}
+	stop = segs.At(segs.Len() - 1).Stop
+	if stop < len(source) && source[stop] == '\n' {
+		stop++
+	}
+	return lineStart, stop
+}
+
+// listItemSourceRange returns the byte range [start, stop) for a list item.
+// ListItem nodes have no Lines() of their own; we use node.Pos() for the
+// start and the child TextBlock's last line for the stop.
+func listItemSourceRange(n *gast.ListItem, source []byte) (start, stop int) {
+	start = n.Pos()
+	// The list item's content lives in a TextBlock child; use its last line.
+	for child := n.FirstChild(); child != nil; child = child.NextSibling() {
+		segs := child.Lines()
+		if segs != nil && segs.Len() > 0 {
+			s := segs.At(segs.Len() - 1).Stop
+			if s > stop {
+				stop = s
+			}
+		}
+	}
+	if stop < len(source) && source[stop] == '\n' {
+		stop++
+	}
+	if stop == 0 {
+		stop = start
+	}
+	return start, stop
 }
 
 func newBlock(path []int, kind, text string) ParsedBlock {
@@ -222,6 +288,33 @@ func hasHeadingPrefix(chain, prefix []string) bool {
 		}
 	}
 	return true
+}
+
+// SourceRangeText returns the exact source bytes that span all selected blocks,
+// including any blank-line separator that follows the last block. This is used
+// to build the OldText for a file-edit operation so that the removal matches
+// the original source precisely instead of relying on re-rendered text.
+//
+// If any block lacks source position data (SourceStart == SourceStop == 0),
+// the function returns an empty string so the caller can skip the removal.
+func SourceRangeText(body string, selected []ParsedBlock) string {
+	if len(selected) == 0 {
+		return ""
+	}
+	start := selected[0].SourceStart
+	stop := selected[len(selected)-1].SourceStop
+	if start == 0 && stop == 0 {
+		return ""
+	}
+	if stop > len(body) {
+		stop = len(body)
+	}
+	// Include the blank line that separates the last block from the next
+	// section so removal leaves a clean result.
+	if stop < len(body) && body[stop] == '\n' {
+		stop++
+	}
+	return body[start:stop]
 }
 
 // RenderExtractedContent renders content for a newly extracted node.

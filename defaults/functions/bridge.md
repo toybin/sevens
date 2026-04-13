@@ -26,9 +26,6 @@ Siblings:
 {{context}}
 
 <output-spec>
-Return a JSON array of edit operations on the target node:
-[{"action": "edit", "file": "{{title}}", "old_text": "exact text", "new_text": "replacement text with [[wiki links]] to siblings"}]
-
 Rules:
 - Edit operations must use exact string matches from the source content
 - Add or extend a "## Connections" section

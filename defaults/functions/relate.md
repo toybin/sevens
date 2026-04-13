@@ -23,14 +23,6 @@ Siblings:
 {{context}}
 
 <output-spec>
-Return a JSON array of edit operations, one per proposed wiki link insertion:
-[{
-  "action": "edit",
-  "file": "{{title}}",
-  "old_text": "exact phrase in the current text",
-  "new_text": "same phrase wrapped as [[wiki link]]"
-}]
-
 Rules:
 - old_text must be an exact match of text that currently appears in the file
 - new_text wraps the same text (or a canonical form of it) in [[ ]]
@@ -38,6 +30,4 @@ Rules:
 - Do not link every noun — be selective. 3-8 links is typical; more than 10 is too many
 - Do not link the same term twice in one document
 
-Returns: edit operations adding [[wiki links]] to the target node
-Effects: modifies the target node in place, does not create new nodes
 </output-spec>

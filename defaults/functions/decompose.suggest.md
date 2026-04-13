@@ -25,11 +25,7 @@ Current children: {{children}}
 {{context}}
 
 <output-spec>
-Return a JSON array of objects: [{"title": "...", "rationale": "..."}]
-
 - Do not propose children that merely paraphrase each other
 - Prefer titles that could stand alone as node names
 
-Returns: list of proposed child titles with rationales
-Effects: none (suggestion only)
 </output-spec>

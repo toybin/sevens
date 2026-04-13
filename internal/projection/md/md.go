@@ -11,6 +11,7 @@ import (
 	"sevens/internal/kb"
 	"sevens/internal/projection"
 	"sevens/internal/triple"
+	"sevens/internal/types"
 )
 
 // MarkdownProjection implements projection.Projection for markdown files.
@@ -39,9 +40,16 @@ func (m *MarkdownProjection) Sync(ctx context.Context, root string) (*projection
 		return nil, fmt.Errorf("md: clear root: %w", err)
 	}
 
+	// Build signifier→predicate reverse map from type definitions so that
+	// orthography slots like "@julian" emit meta/assignee instead of meta/@.
+	var sigMap map[string]string
+	if allTypes, err := types.LoadAllTypeDefs(); err == nil {
+		sigMap = types.BuildSignifierMap(allTypes)
+	}
+
 	tripleCount := 0
 	for _, node := range nodes {
-		triples := nodeToTriples(node, root)
+		triples := nodeToTriples(node, root, sigMap)
 		if err := m.kb.Graph().Store().AssertBatch(ctx, triples); err != nil {
 			return nil, fmt.Errorf("md: assert triples for %q: %w", node.Title, err)
 		}
@@ -57,21 +65,34 @@ func (m *MarkdownProjection) Sync(ctx context.Context, root string) (*projection
 
 // Write renders a single node from graph state to a markdown file.
 func (m *MarkdownProjection) Write(ctx context.Context, root, nodeTitle string) error {
-	w, err := m.kb.Walk(ctx, root, nodeTitle)
+	w, err := m.kb.Walk(ctx, root, nodeTitle, kb.GatherNeighborhood)
 	if err != nil {
 		return err
 	}
 
-	fm := Frontmatter{Title: w.Title}
+	fm := Frontmatter{Title: w.Target.Title}
 	if w.Parent != nil {
-		fm.Parent = *w.Parent
+		fm.Parent = w.Parent.Title
 	}
-	if w.Role != "" {
-		fm.SiblingRole = w.Role
+	if w.Target.Role != "" {
+		fm.SiblingRole = w.Target.Role
 	}
 
-	content := RenderNode(fm, w.Content)
-	filePath := filepath.Join(root, SanitizeFilename(w.Title))
+	// Read meta/* predicates into Extra frontmatter fields.
+	subject := kb.NodeSubject(root, nodeTitle)
+	allTriples, _ := m.kb.Graph().Store().BySubject(ctx, subject)
+	for _, t := range allTriples {
+		if strings.HasPrefix(t.Predicate, "meta/") {
+			key := strings.TrimPrefix(t.Predicate, "meta/")
+			if fm.Extra == nil {
+				fm.Extra = make(map[string]string)
+			}
+			fm.Extra[key] = t.Object
+		}
+	}
+
+	content := RenderNode(fm, w.Target.Content)
+	filePath := filepath.Join(root, SanitizeFilename(w.Target.Title))
 	return os.WriteFile(filePath, []byte(content), 0644)
 }
 
@@ -90,7 +111,19 @@ func (m *MarkdownProjection) WriteAll(ctx context.Context, root string) error {
 }
 
 // ApplyOps executes file operations against the filesystem.
+// It pre-validates all edit ops before applying anything, to avoid
+// partial state on failure.
 func (m *MarkdownProjection) ApplyOps(ctx context.Context, root string, ops []projection.FileOp) (*projection.ApplyResult, error) {
+	// Pre-validate all edit ops before applying anything.
+	for _, op := range ops {
+		if op.Action == "edit" {
+			if err := validateEditOp(root, op, m.kb); err != nil {
+				return nil, fmt.Errorf("pre-validate op (edit %q): %w", op.File, err)
+			}
+		}
+	}
+
+	// All validated — apply.
 	result := &projection.ApplyResult{}
 	for _, op := range ops {
 		switch op.Action {
@@ -135,7 +168,7 @@ func (m *MarkdownProjection) HasChanges(ctx context.Context, root string) (bool,
 // --- File operations ---
 
 func createFile(root string, op projection.FileOp) (string, error) {
-	fm := Frontmatter{Title: op.Title, Parent: op.Parent}
+	fm := Frontmatter{Title: op.Title, Parent: op.Parent, Extra: op.Extra}
 	body := op.Content
 	// Strip any LLM-generated frontmatter from body
 	if strings.HasPrefix(strings.TrimSpace(body), "---") {
@@ -144,6 +177,27 @@ func createFile(root string, op projection.FileOp) (string, error) {
 	content := RenderNode(fm, body)
 	path := filepath.Join(root, SanitizeFilename(op.Title))
 	return path, os.WriteFile(path, []byte(content), 0644)
+}
+
+// validateEditOp checks that the target file exists and contains the expected
+// old text, without modifying any state. Used for pre-validation.
+func validateEditOp(root string, op projection.FileOp, k *kb.KB) error {
+	subject := kb.NodeSubject(root, op.File)
+	filePath, ok, err := k.Graph().Lookup(context.Background(), subject, kb.PredNodeFile)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		filePath = filepath.Join(root, SanitizeFilename(op.File))
+	}
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("md: read %q: %w", filePath, err)
+	}
+	if !strings.Contains(string(data), op.OldText) {
+		return fmt.Errorf("md: exact match not found in %q", filePath)
+	}
+	return nil
 }
 
 func editFile(root string, op projection.FileOp, k *kb.KB) (string, error) {
@@ -210,10 +264,11 @@ func LoadConfig(root string) (Config, error) {
 
 // Config holds the parsed .sevens.edn configuration.
 type Config struct {
-	Path     string           `edn:"path"`
-	Alias    string           `edn:"alias"`
-	MaxChars *int             `edn:"max-chars"`
-	Groups   map[string]Group `edn:"groups"`
+	Path        string           `edn:"path"`
+	Alias       string           `edn:"alias"`
+	MaxChars    *int             `edn:"max-chars"`
+	MaxChildren *int             `edn:"max-children"`
+	Groups      map[string]Group `edn:"groups"`
 }
 
 // Group defines a subgraph that can be included as context.
@@ -286,6 +341,7 @@ func ParseFiles(files []string) ([]ParsedNode, []string) {
 			SiblingRole:  fm.SiblingRole,
 			IncludeGroup: fm.IncludeGroup,
 			Blocks:       ExtractBlocks(body),
+			Extra:        fm.Extra,
 		}
 		if fm.Parent != "" {
 			node.Parent = &fm.Parent
@@ -295,8 +351,21 @@ func ParseFiles(files []string) ([]ParsedNode, []string) {
 	return nodes, errs
 }
 
+// blockMarkdownLine reconstructs a markdown-formatted line for a block,
+// suitable for orthography parsing (headings get ## prefix, list items get - prefix).
+func blockMarkdownLine(block ParsedBlock) string {
+	switch block.Kind {
+	case "heading":
+		return strings.Repeat("#", block.Level) + " " + block.Text
+	case "list-item", "task":
+		return "- " + block.Text
+	default:
+		return block.Text
+	}
+}
+
 // nodeToTriples converts a ParsedNode into triples for the store.
-func nodeToTriples(node ParsedNode, root string) []triple.Triple {
+func nodeToTriples(node ParsedNode, root string, sigMap map[string]string) []triple.Triple {
 	subj := kb.NodeSubject(root, node.Title)
 	triples := []triple.Triple{
 		{Subject: subj, Predicate: kb.PredNodeTitle, Object: node.Title},
@@ -320,7 +389,15 @@ func nodeToTriples(node ParsedNode, root string) []triple.Triple {
 		triples = append(triples, triple.Triple{Subject: subj, Predicate: kb.PredNodeRole, Object: node.SiblingRole})
 	}
 
+	// Extra frontmatter fields → meta/* predicates
+	for k, v := range node.Extra {
+		triples = append(triples, triple.Triple{Subject: subj, Predicate: "meta/" + k, Object: v})
+	}
+
 	// Block triples: blocks are nodes in the graph with block/* predicates.
+	// Create the orthography registry once for all blocks.
+	reg := DefaultRegistry()
+
 	for _, block := range node.Blocks {
 		blockSubj := kb.BlockSubject(root, node.Title, block.Path)
 		triples = append(triples,
@@ -333,6 +410,39 @@ func nodeToTriples(node ParsedNode, root string) []triple.Triple {
 		if len(block.HeadingChain) > 0 {
 			scope := ScopeString(VisibleBlockScope(block.Kind, block.Text, block.HeadingChain))
 			triples = append(triples, triple.Triple{Subject: blockSubj, Predicate: kb.PredBlockScope, Object: scope})
+		}
+
+		// Orthography: parse property lists from the block's markdown line.
+		mdLine := blockMarkdownLine(block)
+		pls := FindPropertyLists(mdLine, nil, reg)
+		for _, pl := range pls {
+			for _, slot := range pl.Slots {
+				pred := "meta/" + slot.Token
+				// Resolve signifier to semantic predicate name if a binding exists.
+				if sigMap != nil {
+					if semantic, ok := sigMap[slot.Token]; ok {
+						pred = "meta/" + semantic
+					}
+				}
+				switch slot.Arity {
+				case ArityTwo:
+					triples = append(triples, triple.Triple{Subject: blockSubj, Predicate: pred, Object: slot.Payload})
+				case ArityOne:
+					triples = append(triples, triple.Triple{Subject: blockSubj, Predicate: pred, Object: slot.Symbol})
+				case ArityZero:
+					triples = append(triples, triple.Triple{Subject: blockSubj, Predicate: pred, Object: "true"})
+				}
+			}
+		}
+
+		// Orthography: parse inline atoms from the block text.
+		atoms := FindInlineAtoms(block.Text, reg)
+		for _, atom := range atoms {
+			triples = append(triples, triple.Triple{
+				Subject:   blockSubj,
+				Predicate: "ref/" + atom.Signifier,
+				Object:    atom.Symbol,
+			})
 		}
 	}
 

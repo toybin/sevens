@@ -1,0 +1,6 @@
+{:name "note"
+ :extends "create"
+ :predicates {:required []
+              :optional ["status" "tags"]}
+ :structure {}
+ :projection {:frontmatter ["status" "tags"]}}

@@ -48,6 +48,7 @@ func (d *DeterministicBackend) createNode(cfg DeterministicConfig, content strin
 		Title:   title,
 		Parent:  cfg.Parent,
 		Content: content,
+		Extra:   cfg.Frontmatter,
 	}
 
 	return TransformResult{

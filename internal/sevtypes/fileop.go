@@ -9,12 +9,12 @@ package sevtypes
 // The Function concept produces these (as transformation output).
 // The Projection concept consumes them (to create/edit files).
 type FileOp struct {
-	Action  string            // "create" or "edit"
-	Title   string            // for create: new node title
-	Parent  string            // for create: parent title
-	File    string            // for edit: target node title
-	OldText string            // for edit: text to find
-	NewText string            // for edit: replacement
-	Content string            // for create: markdown body
-	Extra   map[string]string // additional frontmatter
+	Action  string            `json:"action"`            // "create" or "edit"
+	Title   string            `json:"title,omitempty"`   // for create: new node title
+	Parent  string            `json:"parent,omitempty"`  // for create: parent title
+	File    string            `json:"file,omitempty"`    // for edit: target node title
+	OldText string            `json:"old_text,omitempty"` // for edit: text to find
+	NewText string            `json:"new_text,omitempty"` // for edit: replacement
+	Content string            `json:"content,omitempty"` // for create: markdown body
+	Extra   map[string]string `json:"extra,omitempty"`   // additional frontmatter
 }

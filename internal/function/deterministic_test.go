@@ -3,11 +3,21 @@ package function
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
+
+	"sevens/defaults"
+	"sevens/internal/config"
 )
 
 func TestLoadDeterministicFunctions(t *testing.T) {
-	os.Setenv("HOME", t.TempDir())
+	cfgDir := t.TempDir()
+	config.OverrideConfigDir = cfgDir
+	t.Cleanup(func() { config.OverrideConfigDir = "" })
+	fnDir := filepath.Join(cfgDir, "functions")
+	os.MkdirAll(fnDir, 0755)
+	defaults.SeedFunctions(fnDir)
+
 	for _, name := range []string{"daily-note", "inbox-capture", "inbox-root", "append-note", "section-entry"} {
 		fn, _, err := LoadFunction(name)
 		if err != nil {

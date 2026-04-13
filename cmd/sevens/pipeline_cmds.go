@@ -1,32 +1,20 @@
 package main
 
-// pipeline_cmds.go provides apply/accept/reject/pending commands backed
-// by the new function.Executor and pipeline state machine.
+// pipeline_cmds.go provides apply/accept/reject/pending commands.
+// All orchestration is delegated to the workflow package.
 
 import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"sevens/internal/backend"
 	"sevens/internal/config"
 	"sevens/internal/function"
-	"sevens/internal/projection"
-	projmd "sevens/internal/projection/md"
 	"sevens/internal/ui"
+	"sevens/internal/workflow"
 )
-
-// buildExecutor creates a function.Executor from the CLI flags and kbStack.
-func buildExecutor(stack *kbStack, be backend.Backend) *function.Executor {
-	var tb function.TransformBackend
-	if be != nil {
-		tb = function.NewLLMBackend(be)
-	}
-	ps := function.NewPipelineStore(stack.Store)
-	return function.NewExecutor(stack.KB, tb, ps)
-}
 
 func applyCmd2() *cobra.Command {
 	var root string
@@ -57,13 +45,6 @@ func applyCmd2() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
-			// Load function definition
-			fn, _, err := function.LoadFunction(fnName)
-			if err != nil {
-				return fmt.Errorf("loading function: %w", err)
-			}
-
-			// Open KB stack
 			stack, err := openKB()
 			if err != nil {
 				return fmt.Errorf("opening KB: %w", err)
@@ -71,21 +52,38 @@ func applyCmd2() *cobra.Command {
 			defer stack.Close()
 
 			if dryRun {
-				// Dry-run: render the prompt for the first step and print it
+				fn, _, err := function.LoadFunction(fnName)
+				if err != nil {
+					return fmt.Errorf("loading function: %w", err)
+				}
 				steps := fn.EffectiveSteps()
 				if len(steps) == 0 {
 					return fmt.Errorf("function %q has no steps", fnName)
 				}
-				rc, rcErr := function.ResolveContext(context.Background(), stack.KB, resolved, nodeTitle, steps[0], "")
+				step := steps[0]
+
+				// Follow fn delegation: if this step delegates to another function,
+				// load that function and use its first step.
+				if step.ComposedOf != "" {
+					delegated, _, err := function.LoadFunction(step.ComposedOf)
+					if err != nil {
+						return fmt.Errorf("loading delegated function %q: %w", step.ComposedOf, err)
+					}
+					delegatedSteps := delegated.EffectiveSteps()
+					if len(delegatedSteps) > 0 {
+						step = delegatedSteps[0]
+					}
+				}
+
+				rc, rcErr := function.ResolveContext(context.Background(), stack.KB, resolved, nodeTitle, step, "")
 				if rcErr != nil {
 					return fmt.Errorf("resolving context: %w", rcErr)
 				}
-				prompt := function.RenderPrompt(steps[0].Backend.PromptTemplate, rc)
+				prompt := function.RenderPrompt(step.Backend.PromptTemplate, rc)
 				fmt.Println(prompt)
 				return nil
 			}
 
-			// Create backend
 			globalConfig, err := config.LoadGlobalConfig()
 			if err != nil {
 				return fmt.Errorf("loading config: %w", err)
@@ -105,14 +103,13 @@ func applyCmd2() *cobra.Command {
 			}
 			fmt.Fprintf(os.Stderr, "[backend] %s\n", be.Name())
 
-			exec := buildExecutor(stack, be)
-
-			result, err := exec.Apply(context.Background(), resolved, fn, nodeTitle)
+			deps := buildDeps(stack, be)
+			result, err := workflow.ApplyFunction(ctx(), deps, resolved, fnName, nodeTitle)
 			if err != nil {
 				return fmt.Errorf("applying function: %w", err)
 			}
 
-			displayApplyResult(result, fn, nodeTitle)
+			displayWorkflowApplyResult(result)
 			return nil
 		},
 	}
@@ -144,131 +141,47 @@ func acceptCmd2() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
+			nodeTitle, err := resolveNodeTitle(arg)
+			if err != nil {
+				return err
+			}
+
 			stack, err := openKB()
 			if err != nil {
 				return fmt.Errorf("opening KB: %w", err)
 			}
 			defer stack.Close()
 
-			ps := function.NewPipelineStore(stack.Store)
-
-			// Find the pipeline
-			var pipeline *function.Pipeline
-			if strings.HasPrefix(arg, "pipeline:") {
-				pipeline, err = ps.Load(context.Background(), arg)
-				if err != nil {
-					return fmt.Errorf("loading pipeline: %w", err)
-				}
-			} else {
-				nodeTitle, rerr := resolveNodeTitle(arg)
-				if rerr != nil {
-					return rerr
-				}
-				pending, err := ps.FindPending(context.Background(), resolved)
-				if err != nil {
-					return fmt.Errorf("finding pending: %w", err)
-				}
-				var matches []*function.Pipeline
-				for _, p := range pending {
-					if p.Target == nodeTitle {
-						matches = append(matches, p)
-					}
-				}
-				if len(matches) == 0 {
-					return fmt.Errorf("no pending suggestions for %s", nodeTitle)
-				}
-				if len(matches) > 1 {
-					fmt.Fprintf(os.Stderr, "%s multiple pending pipelines for %s:\n",
-						ui.Warning.Render("[ambiguous]"), ui.NodeTitle.Render(nodeTitle))
-					for _, p := range matches {
-						fmt.Fprintf(os.Stderr, "  %s  %s  step %d\n", p.ID, p.FunctionName, p.CurrentStep)
-					}
-					return fmt.Errorf("ambiguous: pass the pipeline id instead of the node title")
-				}
-				pipeline = matches[0]
-			}
-
-			// Load the function definition
-			fn, _, err := function.LoadFunction(pipeline.FunctionName)
-			if err != nil {
-				return fmt.Errorf("loading function: %w", err)
-			}
-
-			if with != "" {
-				// Revision
-				globalConfig, _ := config.LoadGlobalConfig()
-				be, beErr := backend.FromConfig(globalConfig, backendFlag)
-				if beErr != nil {
-					return fmt.Errorf("initializing backend: %w", beErr)
-				}
-				exec := buildExecutor(stack, be)
-
-				result, err := exec.Revise(context.Background(), resolved, fn, pipeline.ID, with)
-				if err != nil {
-					return fmt.Errorf("revising: %w", err)
-				}
-
-				displayApplyResult(result, fn, pipeline.Target)
-				return nil
-			}
-
-			// No --with: accept and advance
+			// Resolve backend: use flag, or persisted backend from pipeline
 			globalConfig, _ := config.LoadGlobalConfig()
-			be, beErr := backend.FromConfig(globalConfig, backendFlag)
-			if beErr != nil {
-				fmt.Fprintf(os.Stderr, "[warn] backend init: %v, continuing without backend\n", beErr)
-			}
-
-			exec := buildExecutor(stack, be)
-
-			result, err := exec.Accept(context.Background(), resolved, fn, pipeline.ID)
-			if err != nil {
-				return fmt.Errorf("accepting: %w", err)
-			}
-
-			if result.Suspended {
-				displayApplyResult(result, fn, pipeline.Target)
-			} else {
-				// Pipeline completed
-				if result.Result != nil && len(result.Result.Ops) > 0 {
-					// Execute file ops via projection
-					proj := openProjection(stack)
-					projOps := make([]projection.FileOp, len(result.Result.Ops))
-					for i, op := range result.Result.Ops {
-						projOps[i] = projection.FileOp(op)
+			var be backend.Backend
+			if backendFlag != "" || with != "" {
+				// Revision needs a backend; explicit flag always honored
+				effectiveBackend := backendFlag
+				if effectiveBackend == "" {
+					// Try to get backend from pipeline
+					deps := buildDeps(stack, nil)
+					if p, pErr := resolvePipeline(deps, resolved, arg); pErr == nil && p.BackendName != "" {
+						effectiveBackend = p.BackendName
 					}
-					applyResult, err := proj.ApplyOps(context.Background(), resolved, projOps)
-					if err != nil {
-						return fmt.Errorf("executing ops: %w", err)
-					}
-
-					if projmd.IsGitRepo(resolved) {
-						allFiles := append(applyResult.FilesCreated, applyResult.FilesEdited...)
-						if len(allFiles) > 0 {
-							_, gerr := projmd.CommitFiles(resolved,
-								fmt.Sprintf("sevens: apply %s to %q", pipeline.FunctionName, pipeline.Target),
-								allFiles)
-							if gerr != nil {
-								fmt.Fprintf(os.Stderr, "[warn] git commit: %v\n", gerr)
-							}
-						}
-					}
-
-					if err := syncRoot(resolved); err != nil {
-						fmt.Fprintf(os.Stderr, "[warn] re-sync: %v\n", err)
-					}
-
-					fmt.Fprintf(os.Stderr, "%s Applied %s to %s\n",
-						ui.Success.Render("[accept]"),
-						ui.Label.Render(pipeline.FunctionName),
-						ui.NodeTitle.Render(pipeline.Target))
-				} else {
-					fmt.Fprintf(os.Stderr, "%s Accepted %s for %s\n",
-						ui.Success.Render("[accept]"),
-						ui.Label.Render(pipeline.FunctionName),
-						ui.NodeTitle.Render(pipeline.Target))
 				}
+				be, _ = backend.FromConfig(globalConfig, effectiveBackend)
+			} else {
+				be, _ = backend.FromConfig(globalConfig, "")
 			}
+
+			deps := buildDeps(stack, be)
+			pipeline, err := resolvePipeline(deps, resolved, nodeTitle)
+			if err != nil {
+				return err
+			}
+
+			result, err := workflow.AcceptPipeline(ctx(), deps, resolved, pipeline.ID, with)
+			if err != nil {
+				return err
+			}
+
+			displayWorkflowAcceptResult(result)
 			return nil
 		},
 	}
@@ -296,59 +209,31 @@ func rejectCmd2() *cobra.Command {
 				return fmt.Errorf("resolving root: %w", err)
 			}
 
+			nodeTitle, err := resolveNodeTitle(arg)
+			if err != nil {
+				return err
+			}
+
 			stack, err := openKB()
 			if err != nil {
 				return fmt.Errorf("opening KB: %w", err)
 			}
 			defer stack.Close()
 
-			ps := function.NewPipelineStore(stack.Store)
-
-			var pipeline *function.Pipeline
-			if strings.HasPrefix(arg, "pipeline:") {
-				pipeline, err = ps.Load(context.Background(), arg)
-				if err != nil {
-					return fmt.Errorf("loading pipeline: %w", err)
-				}
-			} else {
-				nodeTitle, rerr := resolveNodeTitle(arg)
-				if rerr != nil {
-					return rerr
-				}
-				pending, err := ps.FindPending(context.Background(), resolved)
-				if err != nil {
-					return fmt.Errorf("finding pending: %w", err)
-				}
-				var matches []*function.Pipeline
-				for _, p := range pending {
-					if p.Target == nodeTitle {
-						matches = append(matches, p)
-					}
-				}
-				if len(matches) == 0 {
-					return fmt.Errorf("no pending suggestions for %s", nodeTitle)
-				}
-				if len(matches) > 1 {
-					fmt.Fprintf(os.Stderr, "%s multiple pending pipelines for %s:\n",
-						ui.Warning.Render("[ambiguous]"), ui.NodeTitle.Render(nodeTitle))
-					for _, p := range matches {
-						fmt.Fprintf(os.Stderr, "  %s  %s  step %d\n", p.ID, p.FunctionName, p.CurrentStep)
-					}
-					return fmt.Errorf("ambiguous: pass the pipeline id instead of the node title")
-				}
-				pipeline = matches[0]
+			deps := buildDeps(stack, nil)
+			pipeline, err := resolvePipeline(deps, resolved, nodeTitle)
+			if err != nil {
+				return err
 			}
 
-			exec := function.NewExecutor(stack.KB, nil, ps)
-			p, err := exec.Reject(context.Background(), pipeline.ID)
-			if err != nil {
-				return fmt.Errorf("rejecting: %w", err)
+			if err := workflow.RejectPipeline(ctx(), deps, resolved, pipeline.ID); err != nil {
+				return err
 			}
 
 			fmt.Fprintf(os.Stderr, "%s %s for %s\n",
 				ui.Warning.Render("Rejected"),
-				ui.Label.Render(p.FunctionName),
-				ui.NodeTitle.Render(p.Target))
+				ui.Label.Render(pipeline.FunctionName),
+				ui.NodeTitle.Render(pipeline.Target))
 			return nil
 		},
 	}
@@ -403,37 +288,99 @@ func pendingCmd2() *cobra.Command {
 	return cmd
 }
 
-// displayApplyResult shows the result of an Apply/Accept/Revise call.
-func displayApplyResult(result *function.ApplyResult, fn *function.Function, nodeTitle string) {
-	steps := fn.EffectiveSteps()
-	stepName := ""
-	if result.Pipeline.CurrentStep < len(steps) {
-		stepName = steps[result.Pipeline.CurrentStep].Name
-	} else if len(steps) > 0 {
-		stepName = steps[len(steps)-1].Name
+// formatSuggestions formats parsed suggestions for display.
+func formatSuggestions(suggestions []function.Suggestion) string {
+	if len(suggestions) == 0 {
+		return ""
+	}
+	var out string
+	out += "\nProposed children:\n"
+	for i, s := range suggestions {
+		out += fmt.Sprintf("  %d. %s\n", i+1, ui.Label.Render(s.Title))
+		if s.Rationale != "" {
+			out += fmt.Sprintf("     %s\n", ui.Dim.Render(s.Rationale))
+		}
+	}
+	return out
+}
+
+// --- Display helpers ---
+
+// displayWorkflowApplyResult shows the result of a workflow.ApplyFunction call.
+func displayWorkflowApplyResult(r *workflow.ApplyResult) {
+	fmt.Fprintln(os.Stderr, ui.FormatStep(r.FunctionName, r.StepName, r.Target))
+
+	if r.Suspended {
+		if len(r.Ops) > 0 {
+			for _, op := range r.Ops {
+				name := op.Title
+				if name == "" {
+					name = op.File
+				}
+				fmt.Fprintln(os.Stderr, ui.FormatOp(op.Action, name))
+			}
+			fmt.Fprintf(os.Stderr, "\nRun `sevens accept %q` to apply.\n", r.Target)
+		} else if len(r.Suggestions) > 0 || r.Output != "" {
+			if formatted := formatSuggestions(r.Suggestions); formatted != "" {
+				fmt.Fprint(os.Stderr, formatted)
+			} else {
+				fmt.Print(ui.RenderMarkdownOrPlain(r.Output))
+			}
+			fmt.Fprintf(os.Stderr, "\nRun `sevens accept %q` to approve and continue.\n", r.Target)
+			fmt.Fprintf(os.Stderr, "    or: sevens accept %q --with \"feedback\"\n", r.Target)
+			fmt.Fprintf(os.Stderr, "    or: sevens reject %q\n", r.Target)
+		}
+		return
 	}
 
-	if result.Suspended {
-		fmt.Fprintln(os.Stderr, ui.FormatStep(fn.Name, stepName, nodeTitle))
-		if result.Result != nil {
-			if len(result.Result.Ops) > 0 {
-				for _, op := range result.Result.Ops {
-					name := op.Title
-					if name == "" {
-						name = op.File
-					}
-					fmt.Fprintln(os.Stderr, ui.FormatOp(op.Action, name))
+	// Completed
+	if len(r.FilesCreated) > 0 || len(r.FilesEdited) > 0 {
+		fmt.Fprintf(os.Stderr, "%s Applied %s to %s\n",
+			ui.Success.Render("[apply]"),
+			ui.Label.Render(r.FunctionName),
+			ui.NodeTitle.Render(r.Target))
+	} else if r.Output != "" {
+		fmt.Println(ui.RenderMarkdownOrPlain(r.Output))
+	}
+}
+
+// displayWorkflowAcceptResult shows the result of a workflow.AcceptPipeline call.
+func displayWorkflowAcceptResult(r *workflow.AcceptResult) {
+	fmt.Fprintln(os.Stderr, ui.FormatStep(r.FunctionName, r.StepName, r.Target))
+
+	if r.Suspended {
+		if len(r.Ops) > 0 {
+			for _, op := range r.Ops {
+				name := op.Title
+				if name == "" {
+					name = op.File
 				}
-				fmt.Fprintf(os.Stderr, "\nRun `sevens accept %q` to apply.\n", nodeTitle)
-			} else {
-				fmt.Print(ui.RenderMarkdownOrPlain(result.Result.Raw))
-				fmt.Fprintf(os.Stderr, "\nRun `sevens accept %q` to approve and continue.\n", nodeTitle)
+				fmt.Fprintln(os.Stderr, ui.FormatOp(op.Action, name))
 			}
+			fmt.Fprintf(os.Stderr, "\nRun `sevens accept %q` to apply.\n", r.Target)
+		} else if len(r.Suggestions) > 0 || r.Output != "" {
+			if formatted := formatSuggestions(r.Suggestions); formatted != "" {
+				fmt.Fprint(os.Stderr, formatted)
+			} else {
+				fmt.Print(ui.RenderMarkdownOrPlain(r.Output))
+			}
+			fmt.Fprintf(os.Stderr, "\nRun `sevens accept %q` to approve and continue.\n", r.Target)
+			fmt.Fprintf(os.Stderr, "    or: sevens accept %q --with \"feedback\"\n", r.Target)
+			fmt.Fprintf(os.Stderr, "    or: sevens reject %q\n", r.Target)
 		}
+		return
+	}
+
+	// Completed
+	if len(r.FilesCreated) > 0 || len(r.FilesEdited) > 0 {
+		fmt.Fprintf(os.Stderr, "%s Applied %s to %s\n",
+			ui.Success.Render("[accept]"),
+			ui.Label.Render(r.FunctionName),
+			ui.NodeTitle.Render(r.Target))
 	} else {
-		fmt.Fprintln(os.Stderr, ui.FormatStep(fn.Name, stepName, nodeTitle))
-		if result.Result != nil && result.Result.Raw != "" {
-			fmt.Println(ui.RenderMarkdownOrPlain(result.Result.Raw))
-		}
+		fmt.Fprintf(os.Stderr, "%s Accepted %s for %s\n",
+			ui.Success.Render("[accept]"),
+			ui.Label.Render(r.FunctionName),
+			ui.NodeTitle.Render(r.Target))
 	}
 }

@@ -1,0 +1,3 @@
+{:name "suggestion"
+ :primitive true
+ :schema-instruction "You MUST respond with a JSON object containing a \"suggestions\" field with an array of suggestion objects.\nEach suggestion has a \"title\" and a \"rationale\".\nExample: {\"suggestions\": [{\"title\": \"Revenue Models\", \"rationale\": \"Financial sustainability is unaddressed\"}]}\nRespond ONLY with valid JSON. No text outside the JSON object."}

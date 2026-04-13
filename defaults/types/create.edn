@@ -1,0 +1,3 @@
+{:name "create"
+ :primitive true
+ :schema-instruction "You MUST respond with a JSON object containing an \"ops\" field with an array of file operations.\nEach create operation: {\"action\": \"create\", \"title\": \"Node Title\", \"parent\": \"Parent Title\", \"content\": \"markdown body\", \"extra\": {\"key\": \"value\"}}\nThe \"extra\" field sets frontmatter metadata on the new node.\nRespond ONLY with valid JSON. No text outside the JSON object."}

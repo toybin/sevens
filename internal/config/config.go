@@ -11,8 +11,18 @@ import (
 	"olympos.io/encoding/edn"
 )
 
+// OverrideConfigDir, if non-empty, replaces the default config directory.
+// Used by tests to isolate from the user's real config.
+var OverrideConfigDir string
+
 // ConfigDir returns the path to ~/.config/sevens, creating it if needed.
 func ConfigDir() (string, error) {
+	if OverrideConfigDir != "" {
+		if err := os.MkdirAll(OverrideConfigDir, 0755); err != nil {
+			return "", fmt.Errorf("create config dir %s: %w", OverrideConfigDir, err)
+		}
+		return OverrideConfigDir, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("get home dir: %w", err)

@@ -1,0 +1,9 @@
+{:name "task-status"
+ :kind "state-machine"
+ :states ["todo" "in-progress" "done" "blocked"]
+ :transitions [["todo" "in-progress"]
+               ["todo" "blocked"]
+               ["in-progress" "done"]
+               ["in-progress" "blocked"]
+               ["blocked" "in-progress"]]
+ :aliases {"x" "done" " " "todo" "::blocked" "blocked"}}

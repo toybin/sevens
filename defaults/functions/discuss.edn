@@ -10,4 +10,4 @@
    :with ["node/content"]
    :as "children"}]
  :input "node"
- :output "ops"}
+ :output "create"}

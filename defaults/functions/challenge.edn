@@ -2,7 +2,7 @@
  :description "Devil's advocate — stress-test a node's claims, assumptions, and blind spots"
  :agent {:persona "critic"
          :system-prompt "Find weaknesses and name them directly. Be specific about failure modes — not 'this might not work' but exactly why, for whom, under what conditions. Skip the praise. But also be proportional: don't manufacture criticism where the thinking is sound. The goal is to make the argument stronger, not to score points."
-         :context-policy "minimal"}
+         :context-policy "sevens/minimal"}
  :requires [{:role "history"}]
  :input "node"
  :output "text"}

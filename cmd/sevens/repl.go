@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"sevens/internal/config"
+	"sevens/internal/function"
 	"sevens/internal/repl"
 )
 
@@ -55,10 +56,26 @@ func replCmd() *cobra.Command {
 				session, _ := stack.KB.LoadCurrentSession(context.Background())
 				if session != nil && session.Root == resolved {
 					focusNode = session.Focus
+					fmt.Fprintf(os.Stderr, "[session] resuming focus: %s\n", focusNode)
 				}
 			}
 
-			r, err := repl.New(resolved, focusNode, globalCfg, repl.WithKB(stack.KB))
+			proj := openProjection(stack)
+			ps := function.NewPipelineStore(stack.Store)
+			gq := newGraphQuerier(stack.KB, proj)
+			ar := newApplyRunner(stack.KB, proj)
+			tr := newTemplateRunner(stack.KB, proj)
+			pr := newPipelineRunner(stack.KB, proj, ps, globalCfg)
+			dr := newDiscussionRunner(stack.KB, proj, ps, globalCfg)
+
+			r, err := repl.New(resolved, focusNode, globalCfg,
+				repl.WithKB(stack.KB),
+				repl.WithGraphQuerier(gq),
+				repl.WithApplyRunner(ar),
+				repl.WithTemplateRunner(tr),
+				repl.WithPipelineRunner(pr),
+				repl.WithDiscussionRunner(dr),
+			)
 			if err != nil {
 				return fmt.Errorf("starting repl: %w", err)
 			}

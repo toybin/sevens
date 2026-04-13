@@ -1,0 +1,4 @@
+{:name "sevens/children"
+ :context-policy true
+ :description "Target plus children with content"
+ :gather {:target true :children true}}

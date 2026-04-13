@@ -36,16 +36,7 @@ Siblings (the nodes you might edit):
 {{context}}
 
 <output-spec>
-Return a JSON array of operations:
-
-To edit an existing node:
-{"action": "edit", "file": "Node Title", "old_text": "exact text to find", "new_text": "replacement text"}
-
-To create a new node:
-{"action": "create", "title": "New Node Title", "parent": "Parent Title", "content": "markdown body only, no frontmatter"}
-
 Rules:
-- The content field for create ops should contain ONLY the markdown body — no frontmatter
 - Edit operations must use exact string matches from the source content
 - Prefer editing existing nodes over creating new ones
 - Only create a new node if the insight genuinely doesn't fit anywhere existing

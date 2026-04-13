@@ -53,6 +53,7 @@ type Pipeline struct {
 	FunctionName     string
 	Root             string
 	Target           string // node title
+	BackendName      string // backend used for this pipeline
 	CurrentStep      int
 	Phase            PipelinePhase
 	CurrentResult    *TransformResult

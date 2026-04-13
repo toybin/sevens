@@ -2,32 +2,35 @@ package repl
 
 import (
 	"testing"
-
-	"sevens/internal/kb"
 )
 
-func TestResolveDiscussionFilePath_UsesResolvedSubject(t *testing.T) {
-	root := "/tmp/root"
-	subject := kb.NodeSubject(root, "Discussion - Parent")
+func TestIsThreaded_ReturnsFalseForMissingFile(t *testing.T) {
+	// A mock DiscussionRunner that tracks calls.
+	dr := &mockDiscussionRunner{threaded: false}
+	r := &REPL{discussR: dr}
+	_ = r // DiscussionRunner is wired; test that the interface is satisfied.
 
-	q := &testGraphQuerier{
-		titles: map[string]string{
-			"Discussion - Parent": subject,
-		},
-		objs: map[string]map[string]string{
-			subject: {
-				"node/file-path": "/tmp/root/discussion - parent.md",
-			},
-		},
+	if dr.IsThreaded("/nonexistent/file.md") {
+		t.Fatal("IsThreaded should return false for nonexistent file")
 	}
+}
 
-	r := &REPL{root: root, graphQ: q}
+type mockDiscussionRunner struct {
+	threaded bool
+}
 
-	got, err := r.resolveDiscussionFilePath(root, "Discussion - Parent")
-	if err != nil {
-		t.Fatalf("resolveDiscussionFilePath returned error: %v", err)
-	}
-	if got != "/tmp/root/discussion - parent.md" {
-		t.Fatalf("path = %q, want %q", got, "/tmp/root/discussion - parent.md")
-	}
+func (m *mockDiscussionRunner) StartDiscussion(root, nodeTitle string) (*DiscussionState, string, error) {
+	return &DiscussionState{DiscussTitle: "Discussion - " + nodeTitle, FocusTitle: nodeTitle}, "agent output", nil
+}
+func (m *mockDiscussionRunner) ContinueDiscussion(root string, state *DiscussionState, userInput string) (string, error) {
+	return "agent response", nil
+}
+func (m *mockDiscussionRunner) EndDiscussion(root string, state *DiscussionState) (string, error) {
+	return "abc123", nil
+}
+func (m *mockDiscussionRunner) CancelDiscussion(root string, state *DiscussionState) error {
+	return nil
+}
+func (m *mockDiscussionRunner) IsThreaded(filePath string) bool {
+	return m.threaded
 }

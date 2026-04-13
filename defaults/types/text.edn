@@ -1,0 +1,3 @@
+{:name "text"
+ :primitive true
+ :schema-instruction "You MUST respond with a JSON object containing a \"text\" field with your markdown-formatted response.\nExample: {\"text\": \"**Observation** — The governance model assumes...\"}\nRespond ONLY with valid JSON. No text outside the JSON object."}

@@ -3,8 +3,13 @@ package function
 import (
 	"context"
 	"database/sql"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"sevens/defaults"
+	"sevens/internal/config"
 	"sevens/internal/graphops"
 	"sevens/internal/kb"
 	"sevens/internal/triple"
@@ -452,22 +457,110 @@ func TestContextResolution(t *testing.T) {
 		t.Fatalf("ResolveContext error: %v", err)
 	}
 
-	if rc.Target.Title != "Child A" {
-		t.Fatalf("expected target title 'Child A', got %q", rc.Target.Title)
+	if rc.Target.Target.Title != "Child A" {
+		t.Fatalf("expected target title 'Child A', got %q", rc.Target.Target.Title)
 	}
 
 	parWalk, ok := rc.Roles["par"]
 	if !ok || parWalk == nil {
 		t.Fatal("expected parent in roles")
 	}
-	if parWalk.Title != "Parent Note" {
-		t.Fatalf("expected parent title 'Parent Note', got %q", parWalk.Title)
+	if parWalk.Target.Title != "Parent Note" {
+		t.Fatalf("expected parent title 'Parent Note', got %q", parWalk.Target.Title)
 	}
 
 	rendered := RenderPrompt(step.Backend.PromptTemplate, rc)
 	expected := "Title: Child A\nContent: Child A content\nParent: Parent Note"
 	if rendered != expected {
 		t.Fatalf("rendered prompt mismatch:\n  got:  %q\n  want: %q", rendered, expected)
+	}
+}
+
+func TestPathSpecResolvesContent(t *testing.T) {
+	k, _, db := setupTestKB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	seedNode(t, k, "/root", "Root", "root content", nil)
+	p := "Root"
+	seedNode(t, k, "/root", "A", "Alpha content here", &p)
+	seedNode(t, k, "/root", "B", "Beta content here", &p)
+
+	step := Step{
+		Name: "test-step",
+		Paths: []PathSpec{
+			{
+				Path:        []string{"node/parent~"},
+				With:        []string{"node/content"},
+				As:          "children",
+				ExcludeSelf: false,
+			},
+		},
+		Backend: BackendSpec{
+			Kind:           BackendLLM,
+			PromptTemplate: "Children: {{children}}\nContent:\n{{children-content}}",
+		},
+	}
+
+	rc, err := ResolveContext(ctx, k, "/root", "Root", step, "")
+	if err != nil {
+		t.Fatalf("ResolveContext error: %v", err)
+	}
+
+	if len(rc.PathNodes["children"]) != 2 {
+		t.Fatalf("expected 2 child nodes, got %d", len(rc.PathNodes["children"]))
+	}
+
+	// Check content was fetched
+	for _, rn := range rc.PathNodes["children"] {
+		if rn.Content == "" {
+			t.Fatalf("expected content for child %q, got empty", rn.Title)
+		}
+	}
+
+	rendered := RenderPrompt(step.Backend.PromptTemplate, rc)
+	if !strings.Contains(rendered, "Alpha content here") {
+		t.Fatalf("rendered prompt should contain child content, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Beta content here") {
+		t.Fatalf("rendered prompt should contain child content, got:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "{{children-content}}") {
+		t.Fatal("{{children-content}} placeholder was not resolved")
+	}
+}
+
+func TestHistoryRoleResolution(t *testing.T) {
+	k, _, db := setupTestKB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	seedNode(t, k, "/root", "Note", "some content", nil)
+	k.AppendLog(ctx, kb.LogEntry{
+		Event: "step-completed", Root: "/root", Function: "notice",
+		Node: "Note", Timestamp: "2026-04-10T14:00:00Z", Result: "found gaps",
+	})
+
+	step := Step{
+		Name:     "test-step",
+		Requires: []Require{{Role: "history"}},
+		Backend:  BackendSpec{Kind: BackendLLM, PromptTemplate: "History:\n{{history}}"},
+	}
+
+	rc, err := ResolveContext(ctx, k, "/root", "Note", step, "")
+	if err != nil {
+		t.Fatalf("ResolveContext error: %v", err)
+	}
+	if rc.History == "" {
+		t.Fatal("expected non-empty history")
+	}
+	if !strings.Contains(rc.History, "notice") {
+		t.Fatalf("history should mention 'notice', got: %s", rc.History)
+	}
+
+	rendered := RenderPrompt(step.Backend.PromptTemplate, rc)
+	if strings.Contains(rendered, "{{history}}") {
+		t.Fatal("{{history}} was not resolved")
 	}
 }
 
@@ -498,6 +591,55 @@ func TestConvertFunction(t *testing.T) {
 	}
 }
 
+func TestPipelineBackendPersistence(t *testing.T) {
+	_, store, db := setupTestKB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	ps := NewPipelineStore(store)
+	p := NewPipeline("/root", "test-fn", "My Node")
+	p.BackendName = "claude"
+
+	if err := ps.Save(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := ps.Load(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.BackendName != "claude" {
+		t.Fatalf("expected backend 'claude', got %q", loaded.BackendName)
+	}
+}
+
+func TestApplySetsBackendName(t *testing.T) {
+	k, store, db := setupTestKB(t)
+	defer db.Close()
+
+	seedNode(t, k, "/root", "My Note", "Some content", nil)
+
+	be := &mockBackend{responses: []string{"suggestions"}}
+	ps := NewPipelineStore(store)
+	exec := NewExecutor(k, be, ps)
+
+	fn := singleStepFunction("decompose", "Suggest for {{title}}", "approve")
+
+	result, err := exec.Apply(context.Background(), "/root", fn, "My Note")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Pipeline.BackendName != "mock" {
+		t.Fatalf("expected backend 'mock', got %q", result.Pipeline.BackendName)
+	}
+
+	// Verify persisted
+	loaded, _ := ps.Load(context.Background(), result.Pipeline.ID)
+	if loaded.BackendName != "mock" {
+		t.Fatalf("persisted backend should be 'mock', got %q", loaded.BackendName)
+	}
+}
+
 func TestCancelPendingPipeline(t *testing.T) {
 	k, store, db := setupTestKB(t)
 	defer db.Close()
@@ -521,5 +663,127 @@ func TestCancelPendingPipeline(t *testing.T) {
 	}
 	if p.Phase != PhaseCancelled {
 		t.Fatalf("expected Cancelled, got %s", p.Phase)
+	}
+}
+
+// capturingBackend records the system prompt from each Execute call.
+type capturingBackend struct {
+	systemPrompts []string
+	responses     []string
+	callCount     int
+}
+
+func (c *capturingBackend) Execute(_ context.Context, prompt RenderedPrompt) (TransformResult, error) {
+	c.systemPrompts = append(c.systemPrompts, prompt.System)
+	resp := "ok"
+	if c.callCount < len(c.responses) {
+		resp = c.responses[c.callCount]
+	}
+	c.callCount++
+	return TransformResult{Raw: resp, IsText: true}, nil
+}
+
+func (c *capturingBackend) Name() string { return "capturing" }
+
+// seedTypesDir sets up config.OverrideConfigDir with primitive type definitions
+// so the executor can resolve schema instructions from type definitions.
+func seedTypesDir(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	config.OverrideConfigDir = dir
+	t.Cleanup(func() { config.OverrideConfigDir = "" })
+
+	typesDir := filepath.Join(dir, "types")
+	if err := os.MkdirAll(typesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := defaults.SeedTypes(typesDir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSchemaInstructionFromPrimitiveType(t *testing.T) {
+	seedTypesDir(t)
+	k, store, db := setupTestKB(t)
+	defer db.Close()
+
+	seedNode(t, k, "/root", "My Note", "Some content", nil)
+
+	be := &capturingBackend{responses: []string{"response"}}
+	ps := NewPipelineStore(store)
+	exec := NewExecutor(k, be, ps)
+
+	fn := &Function{
+		Name: "notice",
+		Steps: []Step{{
+			Name:   "step-0",
+			Output: Signature{Shape: ShapeText},
+			Backend: BackendSpec{
+				Kind:           BackendLLM,
+				PromptTemplate: "Analyze {{title}}",
+			},
+		}},
+	}
+
+	_, err := exec.Apply(context.Background(), "/root", fn, "My Note")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(be.systemPrompts) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(be.systemPrompts))
+	}
+	sys := be.systemPrompts[0]
+	// The text primitive's schema instruction should be in the system prompt.
+	if !strings.Contains(sys, "\"text\"") {
+		t.Fatalf("expected text schema instruction in system prompt, got:\n%s", sys)
+	}
+	if !strings.Contains(sys, "Respond ONLY with valid JSON") {
+		t.Fatalf("expected JSON instruction in system prompt, got:\n%s", sys)
+	}
+}
+
+func TestSchemaInstructionFromSubtype(t *testing.T) {
+	seedTypesDir(t)
+	k, store, db := setupTestKB(t)
+	defer db.Close()
+
+	seedNode(t, k, "/root", "My Note", "Some content", nil)
+
+	be := &capturingBackend{responses: []string{"response"}}
+	ps := NewPipelineStore(store)
+	exec := NewExecutor(k, be, ps)
+
+	fn := &Function{
+		Name: "decompose",
+		Steps: []Step{{
+			Name:   "step-0",
+			Output: Signature{Shape: ShapeFileOps, TypeName: "task"},
+			Backend: BackendSpec{
+				Kind:           BackendLLM,
+				PromptTemplate: "Create tasks for {{title}}",
+			},
+		}},
+	}
+
+	_, err := exec.Apply(context.Background(), "/root", fn, "My Note")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(be.systemPrompts) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(be.systemPrompts))
+	}
+	sys := be.systemPrompts[0]
+	// Should contain the create primitive's base instruction.
+	if !strings.Contains(sys, "\"ops\"") {
+		t.Fatalf("expected ops in system prompt, got:\n%s", sys)
+	}
+	// Should contain the task subtype's constructor fields.
+	if !strings.Contains(sys, "task") {
+		t.Fatalf("expected task type reference in system prompt, got:\n%s", sys)
+	}
+	if !strings.Contains(sys, "status") {
+		t.Fatalf("expected status field in system prompt, got:\n%s", sys)
 	}
 }

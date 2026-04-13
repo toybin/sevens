@@ -22,9 +22,7 @@ Current children: {{children}}
 {{context}}
 
 <output-spec>
-Return a JSON array with edit operations:
-[{"action": "edit", "file": "{{title}}", "old_text": "the full body text after the heading", "new_text": "concise 2-3 paragraph summary"}]
-
-Returns: edit operations replacing verbose content with summary
-Effects: modifies the target node, preserves frontmatter and heading, preserves [[wiki links]]
+Rules:
+- Preserves frontmatter and heading
+- Preserves [[wiki links]]
 </output-spec>

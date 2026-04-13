@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"sevens/internal/kb"
+	"sevens/internal/types"
 )
 
 // Executor orchestrates pipeline execution using the state machine,
@@ -37,6 +38,9 @@ type ApplyResult struct {
 // Runs steps until a gate suspends or the pipeline completes.
 func (e *Executor) Apply(ctx context.Context, root string, fn *Function, target string) (*ApplyResult, error) {
 	p := NewPipeline(root, fn.Name, target)
+	if e.Backend != nil {
+		p.BackendName = e.Backend.Name()
+	}
 
 	return e.runFromCurrent(ctx, root, fn, p)
 }
@@ -53,13 +57,7 @@ func (e *Executor) Accept(ctx context.Context, root string, fn *Function, pipeli
 		return nil, err
 	}
 
-	_ = e.KB.AppendLog(ctx, kb.LogEntry{
-		Event:     "accepted",
-		Root:      root,
-		Function:  fn.Name,
-		Node:      p.Target,
-		Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-	})
+	e.logEvent(ctx, "accepted", root, p)
 
 	steps := fn.EffectiveSteps()
 	completed, err := p.Advance(len(steps))
@@ -95,13 +93,7 @@ func (e *Executor) Reject(ctx context.Context, pipelineID string) (*Pipeline, er
 		return nil, err
 	}
 
-	_ = e.KB.AppendLog(ctx, kb.LogEntry{
-		Event:     "rejected",
-		Root:      p.Root,
-		Function:  p.FunctionName,
-		Node:      p.Target,
-		Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-	})
+	e.logEvent(ctx, "rejected", p.Root, p)
 
 	if err := e.Store.Save(ctx, p); err != nil {
 		return nil, err
@@ -156,13 +148,7 @@ func (e *Executor) Revise(ctx context.Context, root string, fn *Function, pipeli
 		return nil, err
 	}
 
-	_ = e.KB.AppendLog(ctx, kb.LogEntry{
-		Event:     "revised",
-		Root:      root,
-		Function:  fn.Name,
-		Node:      p.Target,
-		Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-	})
+	e.logEvent(ctx, "revised", root, p)
 
 	if err := e.Store.Save(ctx, p); err != nil {
 		return nil, err
@@ -187,13 +173,7 @@ func (e *Executor) Cancel(ctx context.Context, fn *Function, pipelineID string) 
 		return nil, err
 	}
 
-	_ = e.KB.AppendLog(ctx, kb.LogEntry{
-		Event:     "cancelled",
-		Root:      p.Root,
-		Function:  fn.Name,
-		Node:      p.Target,
-		Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-	})
+	e.logEvent(ctx, "cancelled", p.Root, p)
 
 	if err := e.Store.Save(ctx, p); err != nil {
 		return nil, err
@@ -220,7 +200,8 @@ func (e *Executor) ContinueLoop(ctx context.Context, root string, fn *Function, 
 	}
 
 	// Run the step again
-	return e.executeStep(ctx, root, fn, p, step)
+	allTypes, _ := types.LoadAllTypeDefs()
+	return e.executeStep(ctx, root, fn, p, step, allTypes)
 }
 
 // EndLoop ends a looping step, advancing to Accepted.
@@ -234,13 +215,7 @@ func (e *Executor) EndLoop(ctx context.Context, root string, fn *Function, pipel
 		return nil, err
 	}
 
-	_ = e.KB.AppendLog(ctx, kb.LogEntry{
-		Event:     "loop-ended",
-		Root:      root,
-		Function:  fn.Name,
-		Node:      p.Target,
-		Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05Z"),
-	})
+	e.logEvent(ctx, "loop-ended", root, p)
 
 	// Now in Accepted phase; advance to next step or complete
 	steps := fn.EffectiveSteps()
@@ -264,9 +239,52 @@ func (e *Executor) EndLoop(ctx context.Context, root string, fn *Function, pipel
 	return e.runFromCurrent(ctx, root, fn, p)
 }
 
+// logEvent records a pipeline transition to the KB log.
+func (e *Executor) logEvent(ctx context.Context, event, root string, p *Pipeline) {
+	_ = e.KB.AppendLog(ctx, kb.LogEntry{
+		Event:     event,
+		Root:      root,
+		Function:  p.FunctionName,
+		Node:      p.Target,
+		Timestamp: time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+	})
+}
+
+// resolveSchemaInstruction composes the schema instruction for a step by
+// walking the type chain. If the step declares an output-type, that type's
+// definition is loaded and composed with its primitive ancestor. Otherwise,
+// the step's OutputShape maps to a primitive type name and that primitive's
+// schema instruction is used directly.
+//
+// allTypes is a pre-loaded map of type definitions to avoid repeated disk/DB
+// lookups on every step.
+func (e *Executor) resolveSchemaInstruction(step Step, allTypes map[string]*types.TypeDef) string {
+	if allTypes == nil {
+		return ""
+	}
+
+	// If the step declares an output type, use its composed instruction.
+	if step.Output.TypeName != "" {
+		if td, ok := allTypes[step.Output.TypeName]; ok {
+			return types.ComposeSchemaInstruction(td, allTypes)
+		}
+	}
+
+	// Fall back to the primitive type for this shape.
+	primName := PrimitiveTypeName(step.Output.Shape)
+	if td, ok := allTypes[primName]; ok {
+		return types.ComposeSchemaInstruction(td, allTypes)
+	}
+
+	return ""
+}
+
 // runFromCurrent runs steps starting from p.CurrentStep until gate or completion.
 func (e *Executor) runFromCurrent(ctx context.Context, root string, fn *Function, p *Pipeline) (*ApplyResult, error) {
 	steps := fn.EffectiveSteps()
+
+	// Load type definitions once for the entire run.
+	allTypes, _ := types.LoadAllTypeDefs()
 
 	for p.CurrentStep < len(steps) && !p.Phase.IsTerminal() {
 		if p.Phase != PhaseRunning {
@@ -282,7 +300,7 @@ func (e *Executor) runFromCurrent(ctx context.Context, root string, fn *Function
 		}
 
 		step := steps[p.CurrentStep]
-		result, err := e.executeStep(ctx, root, fn, p, step)
+		result, err := e.executeStep(ctx, root, fn, p, step, allTypes)
 		if err != nil {
 			return nil, err
 		}
@@ -325,7 +343,8 @@ func (e *Executor) runFromCurrent(ctx context.Context, root string, fn *Function
 }
 
 // executeStep runs a single step: resolve context, render prompt, call backend, complete.
-func (e *Executor) executeStep(ctx context.Context, root string, fn *Function, p *Pipeline, step Step) (*ApplyResult, error) {
+// allTypes is a pre-loaded map of type definitions (may be nil).
+func (e *Executor) executeStep(ctx context.Context, root string, fn *Function, p *Pipeline, step Step, allTypes map[string]*types.TypeDef) (*ApplyResult, error) {
 	// Gather previous step output
 	prevOutput := ""
 	if len(p.PriorStepResults) > 0 {
@@ -354,10 +373,21 @@ func (e *Executor) executeStep(ctx context.Context, root string, fn *Function, p
 	default:
 		be = e.Backend
 		promptText := RenderPrompt(step.Backend.PromptTemplate, rc)
+		// Inject output schema instruction into system prompt.
+		systemPrompt := step.Backend.SystemPrompt
+		if schema := e.resolveSchemaInstruction(step, allTypes); schema != "" {
+			if systemPrompt != "" {
+				systemPrompt += "\n\n"
+			}
+			systemPrompt += schema
+		}
+		// Prepend persona to system prompt if defined.
+		if step.Backend.Persona != "" {
+			systemPrompt = "Persona: " + step.Backend.Persona + "\n\n" + systemPrompt
+		}
 		prompt = RenderedPrompt{
-			System: step.Backend.SystemPrompt,
+			System: systemPrompt,
 			User:   promptText,
-			Model:  step.Backend.Persona,
 		}
 	}
 
@@ -367,18 +397,22 @@ func (e *Executor) executeStep(ctx context.Context, root string, fn *Function, p
 		return nil, fmt.Errorf("backend execution for step %q: %w", step.Name, err)
 	}
 
-	// Parse output based on step's declared shape
-	switch step.Output.Shape {
-	case ShapeText:
-		result.IsText = true
-	case ShapeFileOps:
-		ops, parseErr := ParseOps(result.Raw)
-		if parseErr == nil {
-			result.Ops = ops
+	// Parse output using universal JSON parser.
+	env, _ := ParseOutput(result.Raw, step.Output.Shape)
+	if env != nil {
+		switch {
+		case len(env.Ops) > 0:
+			result.Ops = env.Ops
 			result.IsText = false
+		case len(env.Suggestions) > 0:
+			result.Suggestions = env.Suggestions
+			result.IsText = false
+		case env.Text != "":
+			result.Raw = env.Text
+			result.IsText = true
+		default:
+			result.IsText = step.Output.Shape == ShapeText
 		}
-	case ShapeStructured:
-		result.IsText = false
 	}
 
 	// Complete the step (state transition)

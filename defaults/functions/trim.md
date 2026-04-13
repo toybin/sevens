@@ -31,15 +31,6 @@ Children:
 {{context}}
 
 <output-spec>
-Return a JSON array of edit operations. For each removal, include enough surrounding context in old_text to make the match unambiguous, then drop the unwanted content in new_text:
-
-[{
-  "action": "edit",
-  "file": "{{title}}",
-  "old_text": "[sentence before]\n\n[content to remove]\n\n[sentence after]",
-  "new_text": "[sentence before]\n\n[sentence after]"
-}]
-
 Rules:
 - old_text must be an exact substring of the current content
 - new_text must be non-empty — use surrounding context to stitch, not an empty string

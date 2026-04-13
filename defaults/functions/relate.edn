@@ -12,4 +12,4 @@
          :allow-file-reads false
          :read-only true}
  :input "node"
- :output "ops"}
+ :output "edit"}

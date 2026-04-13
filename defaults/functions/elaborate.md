@@ -31,9 +31,7 @@ Current children: {{children}}
 {{context}}
 
 <output-spec>
-Return a JSON array of edit operations only:
-[{"action": "edit", "file": "{{title}}", "old_text": "exact text to find", "new_text": "expanded replacement"}]
-
-Returns: edit operations on the target node
-Effects: modifies the target node file in place, does NOT create new files
+Rules:
+- Edit operations must use exact string matches from the source content
+- Modifies the target node file in place, does NOT create new files
 </output-spec>

@@ -53,13 +53,6 @@ Children (full content):
 {{context}}
 
 <output-spec>
-If STARTING (no "Discussion - {{title}}" child exists):
-[{"action": "create", "title": "Discussion - {{title}}", "parent": "{{title}}", "content": "# Discussion\n\n**[agent {{timestamp}}]** First question...\n\n**[agent {{timestamp}}]** Follow-up or framing..."}]
-
-If CONTINUING (the discussion child exists and its content is shown above):
-Find the last line of the existing discussion content (or the last line of the relevant thread). Use the LAST 80 CHARACTERS of that line as old_text (copy exactly, no paraphrasing). Append new turns after it:
-[{"action": "edit", "file": "Discussion - {{title}}", "old_text": "[last 80 chars of last line]", "new_text": "[those same 80 chars]\n\n**[agent {{timestamp}}]** Your response here."}]
-
 Rules:
 - Content field for create ops: ONLY markdown body, no frontmatter
 - Each turn starts with **[agent {{timestamp}}]** or **[user {{timestamp}}]**

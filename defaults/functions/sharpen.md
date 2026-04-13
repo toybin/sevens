@@ -28,9 +28,6 @@ Parent: {{parent}}
 {{context}}
 
 <output-spec>
-Return a JSON array of edit operations targeting only the core claim(s):
-[{"action": "edit", "file": "{{title}}", "old_text": "exact text to replace", "new_text": "sharper version"}]
-
 Rules:
 - old_text must be an exact substring of the current content
 - Target one claim — two at most. Do not make sweeping edits across the whole node.

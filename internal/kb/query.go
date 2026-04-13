@@ -5,78 +5,12 @@ import (
 	"strconv"
 
 	"sevens/internal/graphops"
+	"sevens/internal/sevtypes"
 )
 
-// WalkContext is the full local context of a node.
-type WalkContext struct {
-	Subject      string
-	Title        string
-	Content      string
-	Parent       *string
-	Children     []string // titles
-	Siblings     []string // titles
-	CrossRefs    []string // titles
-	ChildRoles   map[string]string
-	SiblingRoles map[string]string
-	Role         string
-}
 
-// Walk returns full local context for a node: content, parent,
-// children, siblings, cross-references, and roles.
-func (k *KB) Walk(ctx context.Context, root, title string) (*WalkContext, error) {
-	subject := NodeSubject(root, title)
-
-	content, _, _ := k.graph.Lookup(ctx, subject, PredNodeContent)
-	role, _, _ := k.graph.Lookup(ctx, subject, PredNodeRole)
-
-	// Parent
-	var parent *string
-	if p, ok, _ := k.graph.Lookup(ctx, subject, PredNodeParent); ok {
-		pt, err := k.resolveTitle(ctx, p)
-		if err == nil && pt != "" {
-			parent = &pt
-		}
-	}
-
-	// Children: follow node/parent inverse
-	childSubjects, _ := k.graph.Compose(ctx, subject,
-		graphops.ParsePath([]string{PredNodeParent + "~"}))
-	children, childRoles := k.resolveTitlesAndRoles(ctx, childSubjects)
-
-	// Siblings: parent forward, then parent inverse, minus self
-	siblingSubjects, _ := k.graph.Compose(ctx, subject,
-		graphops.ParsePath([]string{PredNodeParent, PredNodeParent + "~"}))
-	siblingSubjects = exclude(siblingSubjects, subject)
-	siblings, siblingRoles := k.resolveTitlesAndRoles(ctx, siblingSubjects)
-
-	// Cross-references: node/link forward
-	linkSubjects, _ := k.graph.Compose(ctx, subject,
-		graphops.ParsePath([]string{PredNodeLink}))
-	crossRefs := k.resolveTitleList(ctx, linkSubjects)
-
-	return &WalkContext{
-		Subject:      subject,
-		Title:        title,
-		Content:      content,
-		Parent:       parent,
-		Children:     children,
-		Siblings:     siblings,
-		CrossRefs:    crossRefs,
-		ChildRoles:   childRoles,
-		SiblingRoles: siblingRoles,
-		Role:         role,
-	}, nil
-}
-
-// OverviewNode is one node's metadata in a full-graph overview.
-type OverviewNode struct {
-	Title      string
-	Parent     *string
-	Children   []string
-	ChildCount int
-	CrossRefs  []string
-	CharCount  int
-}
+// OverviewNode is a type alias for sevtypes.OverviewNode.
+type OverviewNode = sevtypes.OverviewNode
 
 // Overview returns the full tree structure for a root.
 func (k *KB) Overview(ctx context.Context, root string) ([]OverviewNode, error) {
@@ -190,7 +124,6 @@ func (k *KB) Validate(ctx context.Context, root string, maxChildren, maxContentL
 
 	var violations []Violation
 	hasParent := make(map[string]bool)
-	isChild := make(map[string]bool)
 
 	for _, subj := range subjects {
 		title, _, _ := k.graph.Lookup(ctx, subj, PredNodeTitle)
@@ -201,7 +134,6 @@ func (k *KB) Validate(ctx context.Context, root string, maxChildren, maxContentL
 		// Missing parent check: has parent predicate, but parent doesn't exist
 		if parentSubj, ok, _ := k.graph.Lookup(ctx, subj, PredNodeParent); ok {
 			hasParent[subj] = true
-			isChild[subj] = true
 			if _, exists, _ := k.graph.Lookup(ctx, parentSubj, PredNodeTitle); !exists {
 				violations = append(violations, Violation{
 					Kind: "missing-parent", Title: title,
@@ -235,15 +167,33 @@ func (k *KB) Validate(ctx context.Context, root string, maxChildren, maxContentL
 			}
 		}
 
-		// Cycle check: is this node its own ancestor?
-		ancestors, _ := k.graph.Reachable(ctx, subj, PredNodeParent, false)
-		for _, a := range ancestors {
-			if a == subj && len(ancestors) > 1 {
+		// Cycle check: walk the parent chain; if we ever return to
+		// this node, it's a cycle. We don't use Reachable because its
+		// visited-set dedup prevents detecting a revisit of the start.
+		{
+			cur := subj
+			visited := map[string]bool{cur: true}
+			isCycle := false
+			for {
+				p, ok, _ := k.graph.Lookup(ctx, cur, PredNodeParent)
+				if !ok || p == "" {
+					break
+				}
+				if p == subj {
+					isCycle = true
+					break
+				}
+				if visited[p] {
+					break // cycle not involving this node
+				}
+				visited[p] = true
+				cur = p
+			}
+			if isCycle {
 				violations = append(violations, Violation{
 					Kind: "cycle", Title: title,
 					Detail: "node is its own ancestor via node/parent",
 				})
-				break
 			}
 		}
 	}

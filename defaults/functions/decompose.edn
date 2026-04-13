@@ -7,4 +7,4 @@
    :gate "approve"}
   {:name "generate"
    :input "suggestions"
-   :output "ops"}]}
+   :output "create"}]}

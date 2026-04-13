@@ -9,4 +9,4 @@
    :with ["node/content"]
    :as "siblings"}]
  :input "node"
- :output "ops"}
+ :output "create"}

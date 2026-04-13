@@ -22,8 +22,6 @@ Prior analysis:
 {{context}}
 
 <output-spec>
-Return plain text — your challenges, not JSON.
-
 Structure as a numbered list of challenges, each with:
 1. The specific claim or assumption you're targeting (quote it)
 2. The strongest counterargument or failure mode

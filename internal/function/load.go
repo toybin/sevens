@@ -1,6 +1,7 @@
 package function
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,105 +10,48 @@ import (
 	"strings"
 
 	"olympos.io/encoding/edn"
-	"sevens/defaults"
 	"sevens/internal/config"
+	"sevens/internal/ednformat"
 )
 
-// ednAgentConfig is the EDN representation of agent configuration.
-type ednAgentConfig struct {
-	Persona       string   `edn:"persona,omitempty"`
-	SystemPrompt  string   `edn:"system-prompt,omitempty"`
-	Model         string   `edn:"model,omitempty"`
-	ContextPolicy string   `edn:"context-policy,omitempty"`
-	Exploration   string   `edn:"exploration,omitempty"`
-	Capabilities  []string `edn:"capabilities,omitempty"`
+// GraphFunctionLoader can load functions from the triple store.
+// Set by the EDN projection at startup.
+var GraphFunctionLoader interface {
+	LoadFunction(ctx context.Context, name string) (*Function, error)
+	ListFunctions(ctx context.Context) ([]string, error)
 }
 
-// ednPathSpec is the EDN representation of a context path.
-type ednPathSpec struct {
-	Path        []string `edn:"path"`
-	ExcludeSelf bool     `edn:"exclude-self,omitempty"`
-	With        []string `edn:"with,omitempty"`
-	As          string   `edn:"as"`
-}
-
-// ednRequire is the EDN representation of a typed input requirement.
-type ednRequire struct {
-	Role     string `edn:"role"`
-	Type     string `edn:"type"`
-	Optional bool   `edn:"optional,omitempty"`
-	Ref      string `edn:"ref,omitempty"`
-	As       string `edn:"as,omitempty"`
-}
-
-// ednDeterministicConfig is the EDN representation of deterministic backend config.
-type ednDeterministicConfig struct {
-	Mode            string `edn:"mode"`
-	TitlePattern    string `edn:"title-pattern,omitempty"`
-	Parent          string `edn:"parent,omitempty"`
-	ParentTemplate  string `edn:"parent-template,omitempty"`
-	Target          string `edn:"target,omitempty"`
-	Heading         string `edn:"heading,omitempty"`
-	CreateIfMissing bool   `edn:"create-if-missing,omitempty"`
-}
-
-// ednBackendSpec is the EDN representation of a step's backend configuration.
-type ednBackendSpec struct {
-	Kind   string                  `edn:"kind"`
-	Config *ednDeterministicConfig `edn:"config,omitempty"`
-}
-
-// ednParam is the EDN representation of a function parameter.
-type ednParam struct {
-	Name     string `edn:"name"`
-	Required bool   `edn:"required,omitempty"`
-	Default  string `edn:"default,omitempty"`
-}
-
-// ednStep is the EDN representation of a pipeline step.
-type ednStep struct {
-	Name        string          `edn:"name"`
-	Prompt      string          `edn:"prompt"`
-	Input       string          `edn:"input"`
-	Output      string          `edn:"output"`
-	Gate        string          `edn:"gate"`
-	Requires    []ednRequire    `edn:"requires,omitempty"`
-	Fn          string          `edn:"fn,omitempty"`
-	MapOver     string          `edn:"map-over,omitempty"`
-	Agent       *ednAgentConfig `edn:"agent,omitempty"`
-	BackendSpec *ednBackendSpec `edn:"backend,omitempty"`
-}
-
-// ednFunction is the EDN representation of a function definition.
-type ednFunction struct {
-	Name         string          `edn:"name"`
-	Description  string          `edn:"description"`
-	Prompt       string          `edn:"prompt"`
-	Input        string          `edn:"input"`
-	Output       string          `edn:"output"`
-	Steps        []ednStep       `edn:"steps"`
-	Requires     []ednRequire    `edn:"requires,omitempty"`
-	Context      []ednPathSpec   `edn:"context,omitempty"`
-	Agent        *ednAgentConfig `edn:"agent,omitempty"`
-	Backend      string          `edn:"backend"`
-	ContextFiles []string        `edn:"context-files"`
-	CrossWalk    string          `edn:"cross-walk,omitempty"`
-	AdHoc        bool            `edn:"ad-hoc,omitempty"`
-	Params       []ednParam      `edn:"params,omitempty"`
-}
+// Type aliases for the shared EDN format structs.
+type ednAgentConfig = ednformat.AgentConfig
+type ednPathSpec = ednformat.PathSpec
+type ednRequire = ednformat.Require
+type ednDeterministicConfig = ednformat.DeterministicConfig
+type ednBackendSpec = ednformat.BackendSpec
+type ednParam = ednformat.Param
+type ednStep = ednformat.Step
+type ednFunction = ednformat.Function
 
 // LoadFunction loads a function definition by name from EDN and converts
 // it directly to the new Function type. Returns both the new Function and
 // the raw EDN struct (for callers that still need legacy fields like
 // ContextFiles, CrossWalk, etc.).
 func LoadFunction(name string) (*Function, *ednFunction, error) {
+	// Try graph-based loading first (populated by EDN projection sync).
+	if GraphFunctionLoader != nil {
+		fn, err := GraphFunctionLoader.LoadFunction(context.Background(), name)
+		if err == nil && fn != nil {
+			return fn, nil, nil
+		}
+	}
+
+	// Fall back to file-based loading.
 	dir, err := config.ConfigDir()
 	if err != nil {
 		return nil, nil, fmt.Errorf("get config dir: %w", err)
 	}
 	fnDir := filepath.Join(dir, "functions")
 	path := filepath.Join(fnDir, name+".edn")
-	data, err := readFunctionAsset(path, name+".edn")
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil, fmt.Errorf("function %q not found — run 'sevens functions' to list available functions", name)
@@ -126,7 +70,7 @@ func LoadFunction(name string) (*Function, *ednFunction, error) {
 	// Load prompt templates from .md files where inline prompt is empty.
 	if raw.Prompt == "" && len(raw.Steps) == 0 {
 		mdPath := filepath.Join(fnDir, name+".md")
-		if md, err := readFunctionAsset(mdPath, name+".md"); err == nil {
+		if md, err := os.ReadFile(mdPath); err == nil {
 			raw.Prompt = string(md)
 		} else {
 			return nil, nil, fmt.Errorf("function %s: must have prompt (inline or %s.md) or steps", name, name)
@@ -137,7 +81,7 @@ func LoadFunction(name string) (*Function, *ednFunction, error) {
 		if raw.Steps[i].Prompt == "" && raw.Steps[i].Fn == "" {
 			stepName := raw.Steps[i].Name
 			mdPath := filepath.Join(fnDir, name+"."+stepName+".md")
-			md, err := readFunctionAsset(mdPath, name+"."+stepName+".md")
+			md, err := os.ReadFile(mdPath)
 			if err != nil {
 				return nil, nil, fmt.Errorf("function %s step %q: no inline prompt and %s not found", name, stepName, mdPath)
 			}
@@ -147,15 +91,21 @@ func LoadFunction(name string) (*Function, *ednFunction, error) {
 
 	fn := convertEDNFunction(&raw)
 
-	if err := fn.ValidateComposition(); err != nil {
-		return nil, nil, fmt.Errorf("function %s: %w", name, err)
-	}
-
 	return fn, &raw, nil
 }
 
 // ListFunctions returns all available function names.
 func ListFunctions() ([]string, error) {
+	// Try graph-based listing first.
+	if GraphFunctionLoader != nil {
+		names, err := GraphFunctionLoader.ListFunctions(context.Background())
+		if err == nil && len(names) > 0 {
+			sort.Strings(names)
+			return names, nil
+		}
+	}
+
+	// Fall back to file-based listing.
 	dir, err := config.ConfigDir()
 	if err != nil {
 		return nil, fmt.Errorf("get config dir: %w", err)
@@ -171,11 +121,6 @@ func ListFunctions() ([]string, error) {
 			continue
 		}
 		nameSet[strings.TrimSuffix(e.Name(), ".edn")] = true
-	}
-	if bundled, err := defaults.ListFunctionNames(); err == nil {
-		for _, name := range bundled {
-			nameSet[name] = true
-		}
 	}
 	names := make([]string, 0, len(nameSet))
 	for n := range nameSet {
@@ -201,21 +146,6 @@ func ListFunctionDefs() ([]Function, error) {
 		fns = append(fns, *fn)
 	}
 	return fns, nil
-}
-
-func readFunctionAsset(userPath, bundledName string) ([]byte, error) {
-	data, err := os.ReadFile(userPath)
-	if err == nil {
-		return data, nil
-	}
-	if !os.IsNotExist(err) {
-		return nil, err
-	}
-	data, err = defaults.ReadFunctionFile(bundledName)
-	if err == nil {
-		return data, nil
-	}
-	return nil, fmt.Errorf("open %s: %w", bundledName, err)
 }
 
 // convertEDNFunction converts raw EDN to the new Function type.
@@ -287,23 +217,8 @@ func convertEDNStep(s ednStep, fn *ednFunction) Step {
 		})
 	}
 
-	switch s.Output {
-	case "ops":
-		step.Output = Signature{Shape: ShapeFileOps}
-	case "suggestions":
-		step.Output = Signature{Shape: ShapeStructured}
-	default:
-		step.Output = Signature{Shape: ShapeText}
-	}
-
-	switch s.Input {
-	case "ops":
-		step.Input = Signature{Shape: ShapeFileOps}
-	case "suggestions":
-		step.Input = Signature{Shape: ShapeStructured}
-	default:
-		step.Input = Signature{Shape: ShapeText}
-	}
+	step.Output = ParseOutputSignature(s.Output, s.OutputType)
+	step.Input = ParseInputSignature(s.Input)
 
 	if s.Gate == "approve" {
 		step.Gate = &GateSpec{
@@ -353,31 +268,9 @@ func effectiveEDNAgent(fn *ednFunction, step *ednStep) *ednAgentConfig {
 	return fn.Agent
 }
 
-// EffectiveSteps returns the pipeline steps, normalizing single-prompt into a one-step pipeline.
-func (f *ednFunction) EffectiveSteps() []ednStep {
-	return effectiveEDNSteps(f)
-}
-
-// ValidateComposition checks step output/input chaining.
-func (f *ednFunction) ValidateComposition() error {
-	steps := f.EffectiveSteps()
-	for i := 1; i < len(steps); i++ {
-		prev := steps[i-1]
-		curr := steps[i]
-		if prev.Fn != "" || prev.MapOver != "" || curr.Fn != "" || curr.MapOver != "" {
-			continue
-		}
-		if prev.Output != "" && curr.Input != "" && prev.Output != curr.Input {
-			return fmt.Errorf("step %q outputs %q but step %q expects input %q",
-				prev.Name, prev.Output, curr.Name, curr.Input)
-		}
-	}
-	return nil
-}
-
 // EDNFunction is the exported alias for the raw EDN function struct.
 // Callers that need legacy fields (ContextFiles, CrossWalk, etc.) use this.
-type EDNFunction = ednFunction
+type EDNFunction = ednformat.Function
 
 // EDNStep is the exported alias for an EDN step definition.
-type EDNStep = ednStep
+type EDNStep = ednformat.Step

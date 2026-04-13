@@ -1,0 +1,4 @@
+{:name "sevens/neighborhood"
+ :context-policy true
+ :description "Target plus parent, children, and siblings with content"
+ :gather {:target true :parent true :children true :siblings true}}

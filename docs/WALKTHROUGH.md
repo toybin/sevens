@@ -1,74 +1,131 @@
 # Sevens Walkthrough
 
-A hands-on guide to every feature in sevens, organized as chapters. Each chapter builds on the previous one. By the end, you'll know how to build a knowledge graph, use AI functions to analyze and grow it, manage multi-step pipelines, create templates, work in the REPL, query the triple store directly, and use agent mode for external AI integration.
+A hands-on guide to every feature in sevens. Each section builds on the
+previous. By the end you will know how to build a knowledge graph, use AI
+functions, manage pipelines, create templates, work in the REPL, query the
+triple store, and integrate with external agents.
 
-This guide assumes you're comfortable with a terminal and have sevens built (`go build -o sevens ./cmd/sevens/`).
+The running example throughout is a knowledge graph called "The Commons" for
+organizing ideas about community governance.
 
 ---
 
-## Chapter 1: Your First Knowledge Graph
+## 1. What Sevens Is
 
-### Creating a root
+Sevens is a CLI tool that manages a tree-structured knowledge graph stored as
+plain Markdown files. Every file is a node. Nodes have parents, children, and
+siblings — forming a tree backed by a triple store (SQLite). AI functions
+operate on nodes: analyzing content, proposing edits, creating children,
+running multi-step pipelines with human approval gates. Deterministic templates
+handle structured creation without an LLM. A REPL provides interactive
+navigation, and the whole system is designed for composition with external AI
+agents.
 
-A "root" is a directory that contains your knowledge graph. Initialize one:
+---
+
+## 2. Installation and Setup
+
+### Build
+
+```
+cd sevens
+go build -o sevens ./cmd/sevens/
+```
+
+### Initialize global config
+
+```
+sevens config init
+```
+
+This creates `~/.config/sevens/config.edn` with default settings, seeds
+built-in function definitions into `~/.config/sevens/functions/`, and seeds
+type definitions into `~/.config/sevens/types/`.
+
+### config.edn overview
+
+The generated config looks like:
+
+```edn
+{:llm {:provider "anthropic"
+       :model "claude-sonnet-4-20250514"
+       :api-key-env "ANTHROPIC_API_KEY"}
+
+ :models {"fast"     {:model "claude-haiku-4-20250514"}
+          "capable"  {:model "claude-sonnet-4-20250514"}
+          "powerful" {:model "claude-opus-4-20250514"}}
+
+ :backend "claude"  ; default: Claude CLI subprocess. Use "anthropic" for API.
+
+ :cost-threshold 0.01
+
+ :theme "dark"}
+```
+
+Key fields:
+
+- `:llm` — default model and API key source
+- `:models` — named profiles usable via `--model fast`
+- `:backend` — default inference backend (`anthropic`, `claude`, `codex`)
+- `:backends` — CLI backend configurations (for Claude CLI or Codex subprocess)
+- `:cost-threshold` — operations below this USD amount auto-approve
+- `:theme` — terminal rendering theme (`light` or `dark`)
+- `:system-prompt` — global prompt prepended to every LLM call
+- `:context-files` — files injected into every AI call (supports `~` expansion)
+
+---
+
+## 3. Your First Knowledge Graph
+
+### Initialize a root
 
 ```
 sevens init ~/Documents/commons --alias commons
 ```
 
-This creates three things:
-1. The directory (if it doesn't exist)
-2. A `.sevens.edn` config file inside it
-3. A git repository (if not already one)
-
-The `.sevens.edn` file is minimal:
+This creates the directory, a `.sevens.edn` marker file, and initializes git.
+The marker file:
 
 ```edn
 {:path "~/Documents/commons"
  :alias "commons"}
 ```
 
-### Writing markdown files
+### Create some files
 
-Create a markdown file in your root directory. Every file needs frontmatter with at least a `title`:
+```
+cd ~/Documents/commons
 
-```markdown
+cat > "The Commons.md" << 'EOF'
+# The Commons
+
+A knowledge graph about community governance — decision-making, resource
+allocation, and collective action.
+EOF
+
+mkdir governance
+cat > "governance/Decision Making.md" << 'EOF'
 ---
-title: The Commons
+title: Decision Making
+parent: The Commons
 ---
 
-A neighborhood that has one place that's a library but also a tool library
-and a seed bank and a repair cafe all mashed together. The idea is shared
-infrastructure for things that don't make sense to own individually.
+How groups make binding decisions. Consensus, voting, delegation,
+and hybrid approaches.
+EOF
+
+cat > "governance/Resource Allocation.md" << 'EOF'
+---
+title: Resource Allocation
+parent: The Commons
+---
+
+How shared resources are distributed and maintained. Commons management,
+budgeting, and sustainability.
+EOF
 ```
 
-The filename doesn't matter for identity -- sevens uses the `title` field. By convention, filenames are lowercase kebab-case (e.g., `the-commons.md`), but this is just for your convenience on disk.
-
-### Creating child nodes
-
-Child nodes point to their parent with the `parent` field:
-
-```markdown
----
-title: Lending Infrastructure Design
-parent: "[[The Commons]]"
----
-
-The technical challenge of creating unified lending systems that work across
-completely different domains -- a book and a table saw have different checkout
-periods, care requirements, liability profiles...
-```
-
-The `[[wiki-link]]` syntax in the parent field creates the tree relationship. You can also use wiki-links in body text to create cross-references between any nodes:
-
-```markdown
-This connects to the ideas in [[Commons Governance Models]] about
-who decides lending policies.
-```
-
-### Syncing
-
-After creating or editing files, sync them into the database:
+### Sync
 
 ```
 sevens sync
@@ -77,336 +134,319 @@ sevens sync
 Output:
 
 ```
-[sync] scanned 3 files, 87 triples
+[sync] Committed changes: a1b2c3d
+[sync] scanned 3 files, 42 triples
 ```
 
-If you're inside the root directory, sevens finds it automatically. If you're elsewhere, pass `--root`:
+Sync reads every `.md` file under the root, parses frontmatter and content,
+and writes triples to the database. If the root is a git repo (it is — `init`
+creates one), sync auto-commits any uncommitted changes first.
 
-```
-sevens sync --root ~/Documents/commons
-```
-
-If you have multiple roots registered, running `sevens sync` with no root specified syncs all of them.
-
-### Exploring the tree
-
-**Overview** -- see the full tree:
+### Overview
 
 ```
 sevens overview
 ```
 
 ```
-The Commons
-├── Lending Infrastructure Design
-├── Commons Governance Models
-└── Multi-Use Space Design
+The Commons (1.2k)
+├── Decision Making (412)
+└── Resource Allocation (389)
 ```
 
-**Walk** -- see a node's content and neighborhood:
+Shows the full tree with character counts.
+
+### Walk a node
 
 ```
-sevens walk "The Commons"
+sevens walk "Decision Making"
 ```
 
 ```
-The Commons
-children: Lending Infrastructure Design, Commons Governance Models, Multi-Use Space Design
+Decision Making
+  parent: The Commons
+  children: (none)
+  siblings: Resource Allocation
+  cross-refs: (none)
 ────────────────────────────────────────────────────────────
-A neighborhood that has one place that's a library but also a tool library
-and a seed bank and a repair cafe all mashed together...
+How groups make binding decisions. Consensus, voting, delegation,
+and hybrid approaches.
+
+─── The Commons (parent)
+A knowledge graph about community governance — decision-making, resource
+allocation, and collective action.
+
+─── Resource Allocation (sibling)
+How shared resources are distributed and maintained. Commons management,
+budgeting, and sustainability.
 ```
 
-**Tree** -- see just the subtree rooted at a node:
-
-```
-sevens tree "Lending Infrastructure Design"
-```
-
-**Search** -- find nodes by title or content:
-
-```
-sevens search "governance"
-```
-
-```
-Title matches:
-  Commons Governance Models
-
-Content matches:
-  Lending Infrastructure Design
-```
+Walk shows the node's content and its graph neighborhood. The default
+`neighborhood` shape includes content from parent and sibling nodes.
 
 ---
 
-## Chapter 2: AI Functions
+## 4. Walk and Context Shapes
 
-### What functions are
+Walk accepts a `--shape` flag that controls how much context is gathered.
+Shapes are defined as type definitions in `~/.config/sevens/types/`:
 
-A function is a named AI operation. It declares three things:
+| Shape | What it gathers | Use case |
+|-------|----------------|----------|
+| `sevens/minimal` | Target node only | Focused edits |
+| `sevens/neighborhood` | Target + parent + children + siblings with content | Default; analysis |
+| `sevens/children` | Target + children with content | Subtree review |
+| `sevens/subtree` | Full recursive subtree from target | Deep analysis |
 
-1. **What context to gather** from the graph (path specs)
-2. **What instructions to give the AI** (prompt template, persona)
-3. **What to do with the result** (display text, or create/edit files)
+The `sevens/` prefix distinguishes built-in shapes from user-defined types.
+You can omit the prefix as shorthand: `--shape minimal` works the same as
+`--shape sevens/minimal`.
+
+```
+sevens walk "The Commons" --shape sevens/subtree
+```
+
+This prints The Commons and all descendants with their full content.
+
+Walk replaces the need for separate overview/tree/inbox commands for context
+gathering — use the shape to control scope. Each shape is stored as an EDN
+type definition:
+
+```edn
+;; ~/.config/sevens/types/sevens-neighborhood.edn
+{:name "sevens/neighborhood"
+ :context-policy true
+ :description "Target plus parent, children, and siblings with content"
+ :gather {:target true :parent true :children true :siblings true}}
+```
+
+The `--edn` flag on walk, overview, and tree outputs EDN instead of formatted
+text, useful for piping to other tools.
+
+---
+
+## 5. AI Functions
 
 ### Applying a function
 
-The simplest use case -- run an analysis function:
-
 ```
-sevens apply notice "The Commons"
+sevens apply notice "Decision Making"
 ```
 
-```
-[notice] notice -> "The Commons"
-[cost] 2847 tokens, ~$0.0043 (auto-approved, below $0.01)
+This calls the LLM with the node's content and neighborhood, using the
+`notice` function's prompt template. The result is displayed as text.
 
-**Gaps** -- There's no discussion of how the institution handles failure modes.
-What happens when a tool is returned broken?
-
-**Tensions** -- The governance section wants distributed authority but the
-revenue model assumes central management.
-
-**Assumptions** -- The document assumes a physical neighborhood with walkable density.
-```
-
-The `notice` function reads the target node, its parent, siblings, and children, then asks the AI to surface patterns, gaps, tensions, and assumptions. The output is text -- it doesn't modify the graph.
-
-Other analysis functions:
+### Dry run
 
 ```
-sevens apply challenge "The Commons"        # devil's advocate
-sevens apply contradict "The Commons"       # find inconsistencies with other nodes
-sevens apply thesis "The Commons"           # what is this subtree trying to say?
-sevens apply synthesize "The Commons"       # patterns across the neighborhood
+sevens apply notice "Decision Making" --dry-run
 ```
 
-Structure-modifying functions create or edit files:
+Prints the fully rendered prompt without calling the LLM. Useful for
+inspecting what context gets sent.
+
+### Model override
 
 ```
-sevens apply elaborate "Lending Infrastructure Design"    # expand sparse content
-sevens apply sharpen "Commons Governance Models"          # rewrite for precision
-sevens apply trim "The Commons"                           # remove redundancy
-sevens apply summarize "The Commons"                      # condense verbose content
+sevens apply notice "Decision Making" --model fast
 ```
+
+Uses the `fast` profile from config (maps to claude-haiku).
+
+### Backend override
+
+```
+sevens apply notice "Decision Making" --backend claude
+```
+
+Routes through the Claude CLI subprocess instead of the API.
 
 ### How context is gathered
 
-Each function declares path specs that walk the graph to gather context. For example, `notice` gathers:
-
-- **parent**: follow `node/parent` forward, fetch `node/content`
-- **siblings**: follow `node/parent` forward then `node/parent~` (inverse, i.e., children of parent), exclude self, fetch `node/content`
-- **children**: follow `node/parent~` (inverse), fetch `node/content`
-
-The `~` suffix means inverse traversal. `node/parent~` from a node finds everything that has that node as its parent -- i.e., its children.
-
-Functions also have context policies:
-- **minimal**: only the target node (used by `challenge` to force evaluation on its own terms)
-- **neighborhood**: target plus parent, siblings, and children (most functions)
-- **full**: entire subtree
-
-### The function definition format
-
-Functions are defined as EDN files with markdown prompt sidecars. Here's `challenge.edn`:
+Each function definition specifies context paths that determine which related
+nodes are included. For example, `notice` gathers parent, siblings, and
+children:
 
 ```edn
-{:name "challenge"
- :description "Devil's advocate -- stress-test claims, assumptions, and blind spots"
- :agent {:persona "critic"
-         :system-prompt "Find weaknesses and name them directly..."
-         :context-policy "minimal"}
- :requires [{:role "history"}]
+{:name "notice"
+ :description "Surface patterns, gaps, tensions, and implicit assumptions"
+ :context
+ [{:path ["node/parent"]
+   :with ["node/content"]
+   :as "parent"}
+  {:path ["node/parent" "node/parent~"]
+   :exclude-self true
+   :with ["node/content"]
+   :as "siblings"}
+  {:path ["node/parent~"]
+   :with ["node/content"]
+   :as "children"}]
  :input "node"
  :output "text"}
 ```
 
-The prompt template lives in `challenge.md` alongside it. The persona field shapes the AI's behavior. The context-policy limits what the AI sees.
+Context paths traverse the graph: `node/parent` follows the parent edge,
+`node/parent~` reverses it (children of a node), and chains like
+`["node/parent" "node/parent~"]` compose (parent's children = siblings).
 
-Multi-step functions have per-step prompt files. `decompose` has:
-- `decompose.edn` -- the function definition with two steps
-- `decompose.suggest.md` -- prompt for the suggestion step
-- `decompose.generate.md` -- prompt for the generation step
+### Output types
 
-### Creating your own functions
+Functions produce one of four primitive output types:
 
-```
-sevens define my-analysis --description "Analyze the argument structure"
-```
+| Type | What it does | Gate? |
+|------|-------------|-------|
+| `text` | Displayed to the user, not persisted | No |
+| `create` | Creates new child nodes (ops) | Yes, if multi-step |
+| `edit` | Modifies existing nodes (ops) | Yes, if multi-step |
+| `suggestion` | Proposes children for review before creation | Yes |
 
-This creates two files in `~/.config/sevens/functions/`:
-- `my-analysis.edn` -- the function definition
-- `my-analysis.md` -- the prompt template (edit this)
+### Function signatures
 
-The generated prompt template includes placeholders for `{{title}}`, `{{parent}}`, `{{content}}`, and `{{context}}`. Edit the `.md` file to customize what the AI does.
-
-You can also create functions with an inline prompt:
+`sevens list functions` shows each function's type signature:
 
 ```
-sevens define quick-check --description "Quick structural check" --prompt "Is this note well-structured? Point out any problems."
+notice :: Parent -> Text          Surface patterns, gaps, tensions...
+elaborate :: Node -> Edit         Expand sparse content with follow-up questions
+decompose :: Node -> Suggestion -> Create  Break a dense node into 5-7 children...
 ```
 
-List all available functions:
+The input type reflects the context policy: functions that gather parent,
+siblings, and children show `Parent` (the first required role); functions
+with no context requirements show `Node`.
 
-```
-sevens functions
-```
+### Built-in function list
 
-### Dry-run mode
+**Analysis functions** (output: text):
 
-Preview what a function will send to the AI without actually calling it:
+| Function | Description | Context |
+|----------|-------------|---------|
+| `notice` | Surface patterns, gaps, tensions, and implicit assumptions | neighborhood |
+| `challenge` | Devil's advocate — stress-test claims and assumptions | minimal + history |
+| `contradict` | Find nodes that conflict with this node's claims | neighborhood |
+| `thesis` | Infer the implicit argument from a node and its children | children |
 
-```
-sevens apply notice "The Commons" --dry-run
-```
+**Edit functions** (output: edit):
 
-This prints the fully rendered prompt, useful for debugging custom functions.
+| Function | Description | Context |
+|----------|-------------|---------|
+| `sharpen` | Rewrite the core claim to be maximally precise | parent |
+| `elaborate` | Expand sparse content with follow-up questions | minimal |
+| `trim` | Remove redundancy, scope drift, padding | children + parent |
+| `merge` | Synthesize children's content back into parent | children |
+| `bridge` | Write connecting narrative between a node and siblings | siblings + parent |
+| `summarize` | Condense verbose content into a concise summary | minimal |
+| `relate` | Propose wiki links from content to other nodes | siblings + parent |
+| `scaffold` | Build section structure and placeholder prompts | parent + children |
+
+**Create functions** (output: create):
+
+| Function | Description | Context |
+|----------|-------------|---------|
+| `promote` | Turn prior suggestions into new child nodes | minimal + cross-walk |
+| `distill` | Extract actionable insights from a discussion | parent + siblings |
+
+**Suggestion function** (output: suggestion):
+
+| Function | Description | Context |
+|----------|-------------|---------|
+| `synthesize` | Detect non-obvious connections across the neighborhood | full neighborhood |
+
+**Multi-step pipelines:**
+
+| Function | Steps | Description |
+|----------|-------|-------------|
+| `decompose` | suggest (suggestion, gate) -> generate (create) | Break a node into 5-7 children |
+| `audit` | observe (text, gate) -> stress-test (text) | Two-pass review: patterns then stress-test |
+
+**Discussion:**
+
+| Function | Description |
+|----------|-------------|
+| `discuss` | Create a discussion child with questions and observations |
 
 ---
 
-## Chapter 3: Pipelines and Approval
+## 6. Pipelines and Approval
 
 ### Multi-step functions
 
-Some functions have multiple steps. `decompose` is the canonical example:
-
-1. **suggest**: AI proposes child topics for a dense node
-2. **generate**: AI creates content for the approved children
-
-Between steps, the pipeline pauses at a "gate" for your review.
-
-### The gate system
+Some functions have multiple steps. `decompose` first suggests children
+(step: suggest), then after approval generates them (step: generate).
 
 ```
-sevens apply decompose "The Commons"
+sevens apply decompose "Decision Making"
 ```
 
 ```
-[decompose] suggest -> "The Commons"
-[cost] 3102 tokens, ~$0.0047 (auto-approved, below $0.01)
+[suggest] decompose → Decision Making
 
 Proposed children:
-  1. Commons Governance Models
-  2. Commons Revenue and Sustainability
-  3. Lending Infrastructure Design
-  4. Multi-Use Space Design
+  1. Consensus Models
+     Groups that require unanimous agreement
+  2. Voting Systems
+     Majority, supermajority, ranked choice
+  3. Delegation Patterns
+     How authority flows from group to individual
 
-Run `sevens accept "The Commons"` to apply.
-    or: sevens accept "The Commons" --with "feedback"
-    or: sevens reject "The Commons"
+Run `sevens accept "Decision Making"` to approve and continue.
+    or: sevens accept "Decision Making" --with "feedback"
+    or: sevens reject "Decision Making"
 ```
 
-The pipeline is now in `Pending` state. You have three options:
+### The state machine
 
-**Accept** -- approve the suggestions and advance to the next step:
+A pipeline progresses through phases:
 
-```
-sevens accept "The Commons"
-```
+1. **Running** — the current step is executing
+2. **Pending** — the step completed and is waiting for approval (at a gate)
+3. **Completed** — all steps are done
 
-**Reject** -- discard the suggestions entirely:
-
-```
-sevens reject "The Commons"
-```
-
-**Revise** -- re-run the step with your feedback:
+### Accept
 
 ```
-sevens accept "The Commons" --with "Add a node about existing community infrastructure"
+sevens accept "Decision Making"
 ```
 
-### Revision with feedback
+Accepts the pending suggestions and runs the next step (generate), which
+creates the actual child nodes as Markdown files.
 
-When you revise, the AI sees your feedback alongside the previous attempt and produces a new suggestion:
-
-```
-sevens accept "The Commons" --with "Add a node about existing community infrastructure"
-```
+### Accept with revision
 
 ```
-[decompose] suggest (revision) -> "The Commons"
-
-Revised children:
-  1. Commons Governance Models
-  2. Commons Revenue and Sustainability
-  3. Existing Community Infrastructure    <- added
-  4. Lending Infrastructure Design
-  5. Multi-Use Space Design
-
-Run `sevens accept "The Commons"` to apply.
+sevens accept "Decision Making" --with "Add a section on sortition"
 ```
 
-You can revise multiple times. The revision chain is preserved according to the gate's history policy:
-- **none**: stateless retry -- AI sees only your latest feedback
-- **latest**: AI sees the most recent attempt plus your feedback
-- **full**: AI sees the complete chain of attempts and feedback
+Re-runs the current step incorporating your feedback. You'll see the revised
+suggestions and must run `accept` again to confirm.
 
-### The pipeline state machine
-
-Pipeline states and transitions:
+### Reject
 
 ```
-Running     step is executing
-Pending     gated step produced a result; awaiting review
-Accepted    human approved; ready to advance
-Looping     in a loop (discussion mode), accumulating results
-Rejected    human rejected (terminal)
-Cancelled   pipeline discarded (terminal)
-Completed   all steps done (terminal)
+sevens reject "Decision Making"
 ```
 
-Key transitions:
-- `apply` -> Running -> Pending (if gated)
-- `accept` -> Pending -> Accepted -> next step
-- `reject` -> Pending -> Rejected
-- `accept --with` -> Pending -> Running -> Pending (revision)
+Discards the pending suggestions. The pipeline is abandoned.
 
-Pipeline state is persisted as triples in the database. You can close your terminal, come back the next day, and resume:
+### Pending
 
 ```
 sevens pending
 ```
 
-```
-The Commons  decompose  step 0  pipeline:abc123:20260410T143200:def456
-```
+Lists all nodes with pending suggestions across the graph:
 
 ```
-sevens accept "The Commons"
+Decision Making  decompose/suggest  (pipeline abc123)
 ```
-
-### The audit function
-
-`audit` demonstrates multi-step composition. It runs two steps:
-
-1. **observe**: delegates to the `notice` function, pauses at a gate
-2. **stress-test**: uses a critic persona to challenge the observations
-
-Each step can be reviewed independently.
-
-### Discussion mode
-
-The `discuss` function creates an interactive conversation:
-
-```
-sevens discuss "Lending Infrastructure Design"
-```
-
-The AI (using a facilitator persona) asks probing questions. You respond in your terminal. Each exchange is a loop iteration that appends to a conversation transcript stored as a discussion child node.
-
-Discussion is also available through the REPL (see Chapter 5).
 
 ---
 
-## Chapter 4: Deterministic Functions (Templates)
+## 7. Deterministic Functions (Templates)
 
-### What deterministic functions are
+Templates are functions that run without an LLM. They create or modify nodes
+using pattern-based title generation and content templates.
 
-Not everything needs AI. Deterministic functions create predictable structure without calling an LLM -- no API key needed. They're defined the same way as AI functions but with `{:backend {:kind "deterministic"}}` in their step definition.
-
-### Built-in templates
-
-List them:
+### List templates
 
 ```
 sevens templates
@@ -415,757 +455,1028 @@ sevens templates
 ```
 daily-note       Create or scaffold today's daily note under inbox
 inbox-capture    Create a quick capture note under inbox
-inbox-root       Bootstrap the inbox container node
+inbox-root       Ensure the inbox root node exists
 append-note      Append a timestamped note to a target node
-section-entry    Insert a bullet under a specific heading
+section-entry    Insert a bullet under a specific heading in a target node
 ```
 
-### Creating nodes from templates
-
-**Daily note:**
+### Capture (quick inbox entry)
 
 ```
-sevens new --template daily-note
+sevens capture "Sortition research"
 ```
 
-Creates a node titled with today's date (e.g., "2026-04-11") under an "inbox" parent. If the inbox node doesn't exist, sevens bootstraps it automatically using the `inbox-root` template.
-
-**With variables:**
-
-```
-sevens new --template daily-note --set summary="Planning session for Q3"
-```
-
-### Quick capture
-
-The `capture` command is a shortcut for `inbox-capture`:
+Creates a node titled "Sortition research" under `inbox/` (bootstrapping
+the inbox root node if it doesn't exist).
 
 ```
-sevens capture "insurance liability model"
+sevens capture "Budget models" --summary "Compare participatory budgeting approaches"
 ```
 
-This creates a new node titled "insurance liability model" under inbox. You can override the parent:
+### Instantiate a template
 
 ```
-sevens capture "insurance liability model" --parent "Lending Infrastructure Design"
+sevens instantiate daily-note
 ```
 
-### The instantiate command
-
-For more control, use `instantiate` directly:
+Creates today's daily note (title: `2026-04-12`) under inbox.
 
 ```
-sevens instantiate append-note --text "Revisit the deposit model" --at .
+sevens instantiate append-note --at "Decision Making" --set text="Revisit after reading Ostrom"
 ```
 
-This appends a timestamped note to the focused node.
+Appends a timestamped note to the "Decision Making" node.
 
 ```
-sevens instantiate section-entry --heading "Open Questions" --text "What about liability?" --at "The Commons"
+sevens instantiate section-entry --at "Decision Making" --set heading="Open Questions" --set text="How does sortition scale?"
 ```
 
-This inserts a bullet under the "Open Questions" heading in "The Commons", creating the heading if it doesn't exist.
+Inserts a bullet under the "Open Questions" heading.
 
-### Preview mode
+### Template modes
 
-See what a template would produce without writing files:
+Templates operate in one of three modes:
+
+- **create-node** — creates a new Markdown file with frontmatter
+- **append-node** — appends content to an existing node
+- **insert-block** — inserts content under a specific heading (creates the heading if `create-if-missing` is true)
+
+### Dry run
 
 ```
-sevens new --template daily-note --dry-run
+sevens instantiate daily-note --dry-run
 ```
 
+Shows what would be created without writing files.
+
+### New (simple node creation)
+
 ```
-Template Preview
-function: daily-note
-mode:     create-node
-title:    2026-04-11
-parent:   inbox
-────────────────────────────────────────────────────────────
-# 2026-04-11
+sevens new "Collective Action" --parent "The Commons"
 ```
 
-### The deterministic backend
+Creates a bare node without a template. If you have focus set (see section 16),
+the REPL's `new` command uses the focused node as the default parent.
 
-Deterministic functions support three modes:
+### Template definition format
 
-- **create-node**: creates a new node with a title pattern, parent, and content template
-- **append-node**: appends content to an existing node
-- **insert-block**: inserts content under a specific heading in a node
+```edn
+{:name "inbox-capture"
+ :description "Create a quick capture note under inbox"
+ :steps [{:name "create"
+          :output "ops"
+          :backend {:kind "deterministic"
+                    :config {:mode "create-node"
+                             :title-pattern "{{title}}"
+                             :parent "inbox"
+                             :parent-template "inbox-root"}}}]
+ :params [{:name "title" :required true}
+          {:name "summary"}]}
+```
 
-Each mode uses template variables (`{{date}}`, `{{time}}`, `{{title}}`, `{{summary}}`, etc.) that are resolved at execution time. User-provided variables via `--set key=value` merge with built-in variables.
+The `:parent-template` field bootstraps the parent node if it doesn't exist,
+by recursively executing the named template.
 
 ---
 
-## Chapter 5: The REPL
+## 8. The Type System
 
-### Starting a session
+### Primitives
+
+Four primitive output types are built-in:
+
+```edn
+;; text — displayed, not persisted
+{:name "text"
+ :primitive true
+ :schema-instruction "Respond with JSON containing a \"text\" field..."}
+
+;; create — new nodes
+{:name "create"
+ :primitive true
+ :schema-instruction "Respond with JSON containing an \"ops\" field..."}
+
+;; edit — modify existing nodes
+{:name "edit"
+ :primitive true
+ :schema-instruction "Respond with JSON containing an \"ops\" field..."}
+
+;; suggestion — proposed children for review
+{:name "suggestion"
+ :primitive true
+ :schema-instruction "Respond with JSON containing a \"suggestions\" field..."}
+```
+
+Each primitive carries a schema instruction that tells the LLM how to format
+its response. This instruction is injected into the system prompt automatically.
+
+### Subtypes
+
+User-defined types extend primitives:
+
+```edn
+;; ~/.config/sevens/types/task.edn
+{:name "task"
+ :extends "create"
+ :predicates {:required ["status" "deadline"]
+              :optional ["priority" "assignee" "estimate"]}
+ :structure {:parent-type "project"
+             :children {:min 0 :max 5}}
+ :projection {:frontmatter ["status" "deadline" "priority" "assignee"]
+              :orthography {"status"   {:value-model "task-status"}
+                            "assignee" {:signifier "@" :value-model "person"}
+                            "priority" {:signifier "!" :value-model "priority"}
+                            "estimate" {:signifier "~" :value-model "duration"}}}}
+```
+
+A node conforms to a type when its predicates match the shape. Required
+predicates must be present; structural constraints (parent type, child count)
+must be satisfied.
+
+### Conformance checking
+
+```
+sevens types check "Decision Making"
+```
+
+```
+text    CONFORMS
+create  CONFORMS
+edit    CONFORMS
+task    no
+  missing: status, deadline
+  structure: FAIL
+note    CONFORMS
+  present: (none required)
+```
+
+Primitives (`text`, `create`, `edit`) have no required predicates, so every
+node conforms to them. Custom types with predicates or structure constraints
+will show `no` when requirements are not met.
+
+### Find conforming nodes
+
+```
+sevens types nodes note
+```
+
+Lists all nodes that conform to the `note` type.
+
+### List types
+
+```
+sevens types
+```
+
+Shows all defined types with their predicate requirements and which functions
+produce each type.
+
+---
+
+## 9. Value Models
+
+Value models define how predicate values are validated and normalized. They
+live in `~/.config/sevens/value-models/`.
+
+### Enum
+
+```edn
+;; priority.vm.edn
+{:name "priority"
+ :kind "enum"
+ :members ["low" "medium" "high" "urgent"]
+ :aliases {"!" "urgent" "!!" "high"}}
+```
+
+Payload must be a member or resolve through an alias. `!` resolves to `urgent`.
+
+### State machine
+
+```edn
+;; task-status.vm.edn
+{:name "task-status"
+ :kind "state-machine"
+ :states ["todo" "in-progress" "done" "blocked"]
+ :transitions [["todo" "in-progress"]
+               ["todo" "blocked"]
+               ["in-progress" "done"]
+               ["in-progress" "blocked"]
+               ["blocked" "in-progress"]]
+ :aliases {"x" "done" " " "todo" "::blocked" "blocked"}}
+```
+
+Validates that the current value + proposed value form a valid transition.
+Aliases like `x` map to `done` in property lists.
+
+### Date
+
+```edn
+{:name "date"
+ :kind "date"
+ :format "2006-01-02"}
+```
+
+### Reference
+
+```edn
+{:name "person"
+ :kind "reference"
+ :resolves-to "node"
+ :signifier "@"}
+```
+
+Validates that the payload resolves to an existing node (or records an
+unresolved reference).
+
+---
+
+## 10. Open Frontmatter
+
+Arbitrary YAML frontmatter fields on Markdown files are extracted as
+`meta/*` predicates on the node. This means any frontmatter key you add
+becomes queryable:
+
+```markdown
+---
+parent: The Commons
+role: framework
+status: draft
+tags: governance, theory
+---
+# Decision Making
+```
+
+Sync extracts these as triples:
+
+```
+node:Decision-Making    meta/role      "framework"
+node:Decision-Making    meta/status    "draft"
+node:Decision-Making    meta/tags      "governance, theory"
+```
+
+Round-trip fidelity: when sevens edits a node, frontmatter fields that it
+doesn't understand are preserved exactly as written.
+
+---
+
+## 11. Block-Level Orthography
+
+Blocks are the structural elements within a node: headings, list items,
+paragraphs. Sevens tracks blocks with stable identities and paths.
+
+### Property lists
+
+Attach semantic metadata to headings or list items using parenthesized
+property lists:
+
+```markdown
+## Implementation
+(status in-progress | @ julian | #research)
+
+- Design the API
+  (x | ! urgent)
+
+- Write tests
+  (status todo)
+```
+
+### Slot arities
+
+Each slot in a property list has one of three arities:
+
+```
+arity-0: (x)                    — bare token, resolves via aliases
+arity-1: (@julian)              — signifier fused with symbol
+arity-2: (status done)          — key + payload
+```
+
+### Signifiers
+
+Configurable tokens that serve as compact keys:
+
+| Signifier | Typical meaning | Example |
+|-----------|----------------|---------|
+| `@` | Person/assignee | `@julian`, `(@ julian)` |
+| `#` | Tag/context | `#research` |
+| `!` | Priority/urgency | `(! urgent)`, `(!urgent)` |
+| `~` | Estimate | `(~2h)` |
+| `::` | State transition | `(::blocked)` |
+
+### Inline atoms
+
+Signifier-symbol atoms also work inline in prose:
+
+```markdown
+This work relates to #research and needs input from @julian.
+```
+
+### Triple emission
+
+Property lists and inline atoms emit triples at block scope:
+
+```
+block:123    meta/status      "in-progress"
+block:123    meta/assignee    "julian"
+block:123    meta/tag         "research"
+```
+
+### Block commands
+
+```
+sevens blocks "Decision Making"
+```
+
+Lists the block structure with paths, kinds, and scope:
+
+```
+Decision Making
+────────────────────────────────────────────────────────────
+  0      paragraph   How groups make binding decisions...
+```
+
+Since the title comes from frontmatter (`title: Decision Making`), there is
+no heading block in the body — it starts directly with the paragraph at
+path 0.
+
+```
+sevens diff-blocks "Decision Making"
+```
+
+Shows block-level changes since the last sync: inserted, edited, deleted,
+and (with `--unchanged`) unchanged blocks.
+
+### Extract a block into a new node
+
+```
+sevens extract-block "Decision Making" 2 "Binding Decisions" --parent "Decision Making"
+```
+
+Creates a new node from block path 2, removes that content from the source,
+and commits both changes.
+
+---
+
+## 12. The REPL
+
+### Starting
+
+```
+sevens repl
+```
+
+Or with an initial focus:
 
 ```
 sevens repl "The Commons"
 ```
 
-This starts an interactive session focused on "The Commons". If you omit the node title, the REPL uses your active focus session (from `sevens focus`).
+The REPL resumes your previous session's focus if one exists.
+
+Many REPL commands operate on the focused node. Commands like `blocks`,
+`children`, `siblings`, `note`, `discuss`, function application, and `revert`
+require a focused node and will prompt you to focus one if none is set.
 
 ### Navigation
 
 | Command | Effect |
-|---|---|
-| `<title>` | Focus a node by title |
-| `focus <title>` / `f <title>` | Explicit focus (when title matches a command name) |
-| `..` / `up` | Move to parent |
-| `root` | Clear focus (go to root) |
+|---------|--------|
+| `<title>` | Focus a node by typing its title |
+| `focus <title>` / `f <title>` | Explicit focus (when title matches a command) |
+| `..` or `up` | Move to parent |
+| `root` | Clear focus |
 | `child <n>` / `c <n>` | Focus the Nth child |
 | `sibling <n>` / `s <n>` | Focus the Nth sibling |
 | `<n>` | Focus the Nth item from the last printed list |
 
-When you navigate, the REPL shows the node's neighborhood:
-
-```
-The Commons> child 1
-Lending Infrastructure Design
-parent: The Commons
-children: (none)
-siblings: Commons Governance Models, ...
-────────────────────────────────────────────────────────────
-The technical challenge of creating unified lending systems...
-```
-
-### Viewing commands
+### Viewing
 
 | Command | Effect |
-|---|---|
-| `walk` | Walk the focused node (same as the CLI `walk`) |
+|---------|--------|
+| `walk` | Walk the focused node (shows content + neighborhood) |
+| `overview` | Print full tree |
 | `children` | List children with numbers |
 | `siblings` | List siblings with numbers |
-| `overview` | Print full tree |
-| `blocks` | List block structure of the focused node |
-| `blocks <title>` | List blocks for another node |
+| `inbox` | List children summaries for focused node |
+| `inbox <title>` | List children summaries for another node |
+| `blocks` | List block structure for focused node |
+| `blocks <title>` | List block structure for another node |
 | `diff-blocks` | Show block-level changes since last sync |
-| `inbox` | List inbox children |
-| `inbox <title>` | List children of another container |
 | `search <query>` | Search titles and content |
 | `pending` | List pending suggestions |
-| `log` | Show operation log for the focused node |
-| `sync` | Sync filesystem changes into the graph |
+| `log` | Show operation log for focused node |
+| `sync` | Re-sync filesystem changes |
 
-### Applying functions interactively
+### Functions in the REPL
 
 Type a function name to apply it to the focused node:
 
 ```
 The Commons> notice
-[notice] notice -> "The Commons"
-...
+[backend] Anthropic API (claude-sonnet-4-20250514)
+[notice/default] → The Commons
 
-The Commons> challenge
-[challenge] challenge -> "The Commons"
-...
+The governance framework assumes consensus is achievable...
 ```
 
-Override the model:
+With options:
 
 ```
 The Commons> notice --model fast
-```
-
-Preview the prompt:
-
-```
 The Commons> notice --dry-run
 ```
 
-Accept and reject pending results:
+### Accept / reject in the REPL
+
+After a gated step suspends:
+
+```
+The Commons> decompose
+...
+Proposed children: ...
+
+(y)es / (n)o / (r)evise: y
+```
+
+Or handle it manually:
 
 ```
 The Commons> accept
 The Commons> reject
 ```
 
-### Discussion mode
-
-Start a discussion:
+### Block-level operations
 
 ```
-The Commons> discuss
+The Commons> blocks
+  1. h1     root  The Commons
+  2. para   1     A knowledge graph about community governance...
+
+The Commons> 2
+The Commons#2> sharpen
 ```
 
-The AI asks a probing question. Type your response directly. The AI responds. Continue the conversation as long as you want.
-
-End the discussion (saves the transcript):
-
-```
-.end
-```
-
-Cancel (discards the transcript):
+Selecting a block number focuses that block. Functions applied in block focus
+mode target that specific block.
 
 ```
-.cancel
+The Commons#2> extract-block
 ```
 
-Non-interactive mode (single exchange):
+Extracts the focused block into a new node.
+
+### Creating nodes
 
 ```
-The Commons> discuss -n
+The Commons> new "Collective Action"
+```
+
+Creates a child of the focused node.
+
+### Templates in the REPL
+
+```
+The Commons> templates
+  daily-note       Create or scaffold today's daily note under inbox
+  inbox-capture    Create a quick capture note under inbox
+  ...
+
+The Commons> capture "Research notes"
+The Commons> instantiate daily-note
+The Commons> instantiate append-note --set text="Review Ostrom chapter 3"
+The Commons> instantiate section-entry --set heading="Open Questions" --set text="Scale limits?"
 ```
 
 ### Note mode
-
-Quick annotation appended to the focused node:
 
 ```
 The Commons> note
 ```
 
-Type your note, then press Enter. It's appended with a timestamp.
+Enters note mode. Type your note, then press enter on an empty line to submit.
+The note is appended to the focused node.
 
-### Block operations
-
-Select a block by number from a `blocks` listing, then apply functions to it or extract it:
+### Discussion mode
 
 ```
-The Commons> blocks
-  p.0    paragraph   A neighborhood that has one place...
-  h.1    h2          Lending Model
-  p.2    paragraph   The technical challenge of creating...
-
-The Commons> extract-block h.1
+The Commons> discuss
 ```
 
-### Session commands
+Starts an interactive discussion. The agent asks questions; you respond. When
+done:
+
+```
+[you]> .end
+```
+
+Or discard:
+
+```
+[you]> .cancel
+```
+
+### Session dot commands
 
 | Command | Effect |
-|---|---|
-| `.info` | Show current state (focus, root, model, includes) |
-| `.model <tier>` | Switch model (fast, capable, powerful, or raw model ID) |
-| `.backend <name>` | Switch inference backend |
+|---------|--------|
+| `.info` | Show current focus, root, model, backend, theme, includes |
+| `.model <name>` | Switch model (`fast`, `capable`, `powerful`, or raw ID) |
+| `.backend <name>` | Switch backend (`anthropic`, `claude`, `codex`) |
 | `.theme light\|dark` | Switch rendering theme |
 | `.dry` | Toggle dry-run mode |
-| `.include <title>...` | Add nodes to context |
-| `.include clear` | Clear all context includes |
-| `.exclude <title>` | Remove a node from context |
-| `.functions` | List available functions |
-| `.help` | Show full command list |
-| `.quit` | Exit the REPL |
+| `.include <title>...` | Add nodes to context for apply calls |
+| `.include @GroupName` | Include all children of a group node |
+| `.include clear` | Clear all includes |
+| `.exclude <title>` | Remove a node from includes |
+| `.functions` / `.fns` | List available functions |
+| `.clear` | Clear screen |
+| `.help` / `.h` | Show help |
+| `.quit` / `.exit` / `.q` | Exit |
 
 ---
 
-## Chapter 6: Blocks
+## 13. Discussion Mode
 
-### What blocks are
+### CLI usage
 
-Blocks are structural elements within a node's content -- headings, paragraphs, list items, tasks. Each block is tracked as its own entity in the graph with `block/*` predicates:
-
-- `block/node` -- which document node this block belongs to
-- `block/content` -- the block's text
-- `block/kind` -- heading, paragraph, list-item, task, etc.
-- `block/path` -- structural position (e.g., `h.1`, `p.2`, `li.3`)
-- `block/scope` -- the heading scope containing this block
-
-### Listing blocks
+Single-turn (non-interactive):
 
 ```
-sevens blocks "The Commons"
+sevens discuss "Decision Making"
 ```
 
-```
-The Commons
-────────────────────────────────────────────────────────────
-  p.0     paragraph   A neighborhood that has one place that's a library but also...
-  h.1     h2          Lending Model
-  p.2     paragraph   The technical challenge of creating unified lending systems...
-  h.3     h2          Governance
-  p.4     paragraph   How decisions get made about what to stock, lending periods...
-```
+Runs the discuss function once and creates a "Discussion - Decision Making"
+child node.
 
-### Diffing blocks
-
-See what changed since the last sync:
+Interactive multi-turn:
 
 ```
-sevens diff-blocks "The Commons"
+sevens discuss "Decision Making" --interactive
 ```
 
-```
-The Commons
-the-commons.md
-────────────────────────────────────────────────────────────
-Edited:
-  p.2  The technical challenge has been revised to include...
-    scope: Lending Model
+Opens a back-and-forth conversation. Type messages, the agent responds. End
+with `.end` to save or `.cancel` to discard.
 
-Inserted:
-  p.5  New paragraph about insurance requirements
-    scope: Governance
-
-Deleted:
-  p.3  Old paragraph about checkout periods
-```
-
-Include unchanged blocks for a complete picture:
+### REPL usage
 
 ```
-sevens diff-blocks "The Commons" --unchanged
+Decision Making> discuss
 ```
 
-### Extracting blocks into new nodes
+Enters discussion mode in the REPL. The prompt changes to `[you]>`.
+Type messages to continue the conversation. Commands like `walk`, `blocks`,
+and function names still work during discussion mode.
 
-Extract a heading section into a new child node:
+If the discussion node already has threads (multiple `[user]`/`[agent]` turns
+in the file), the discussion runs non-interactively. Edit the discussion file
+directly to add `[user]` messages to specific threads.
+
+### Threading
+
+Discussions are stored as child nodes with the naming convention
+"Discussion - {Node Title}". Each turn is marked with `**[agent]**` or
+`**[user]**` headers.
+
+### Dry run
 
 ```
-sevens extract-block "The Commons" h.1
+sevens discuss "Decision Making" --dry-run
 ```
 
-This takes the "Lending Model" heading and all content under it, creates a new node titled "Lending Model" as a child of "The Commons", and removes the extracted content from the source.
-
-Extract with a custom title and parent:
-
-```
-sevens extract-block "The Commons" h.1 "Lending Infrastructure Design" --parent "The Commons"
-```
-
-### Block identity across edits
-
-Blocks maintain stable identity across edits using structural path tracking. When you edit a paragraph, sevens matches it to the same block in the previous sync using fuzzy text matching and structural position. This means block-level operations (like diffing) work correctly even when you've added, removed, or reordered content.
+Prints the rendered prompt without calling the LLM.
 
 ---
 
-## Chapter 7: Agent Mode
+## 14. Agent Mode
 
-### What agent mode is
+Agent mode bridges sevens with external AI agents (Claude CLI, Codex, etc.)
+that run outside sevens' pipeline.
 
-Agent mode is for when you're already working inside an AI assistant (like Claude Code or Codex) and want the assistant to use sevens as a tool. Instead of sevens calling the LLM, the external AI calls sevens.
-
-### The prepare checklist
-
-```
-sevens prepare notice "Lending Infrastructure Design"
-```
-
-Output:
+### Prepare
 
 ```
-[task] notice -> "Lending Infrastructure Design"
-
-[read] target
-  $ sevens walk "Lending Infrastructure Design"
-
-[read] parent
-  $ sevens walk "The Commons" --depth 0
-
-[read] siblings (4 nodes)
-  $ sevens walk "Commons Governance Models" --depth 0
-  $ sevens walk "Commons Revenue and Sustainability" --depth 0
-  $ sevens walk "Existing Community Infrastructure" --depth 0
-  $ sevens walk "Multi-Use Space Design" --depth 0
-
-[instruction]
-  Examine this node and its neighborhood. Surface what the author
-  can't easily see from inside their own thinking...
-
-[output] text
-[submit]
-  $ sevens submit "Lending Infrastructure Design" --function notice \
-      --step notice --output text --response-file /tmp/notice-notice.txt
+sevens prepare decompose "Decision Making"
 ```
 
-This is a structured checklist telling the external AI:
-1. What files to read (via `sevens walk` commands)
-2. What instruction to follow
-3. How to submit the result
+Compiles a function into a human-readable checklist showing what the agent
+needs to do: what steps to run, what context to gather, what output format
+to use. This is the "task briefing" you'd paste into an agent.
 
-### Submitting results
+For multi-step functions like `decompose`, the briefing shows each step's
+prompt template. Later steps may show empty sections (e.g.,
+`<approved-suggestions></approved-suggestions>`) because they depend on
+output from earlier steps. This is expected — the agent fills these in
+sequentially.
 
-The external AI writes its response to a file and submits:
+### Submit
+
+After an agent produces results, submit them back:
 
 ```
-sevens submit "Lending Infrastructure Design" \
-  --function notice \
-  --step notice \
-  --output text \
-  --response-file /tmp/notice-notice.txt
+sevens submit "Decision Making" --function decompose --output ops --response-file response.json
 ```
 
-For functions that produce file operations (like `decompose` or `elaborate`), use `--output ops`. For suggestion steps, use `--output suggestions`. The response is validated and the pipeline state machine advances.
+This creates a pipeline with the external result, which then goes through the
+normal accept/reject flow:
 
-If the output type is `ops` or `suggestions`, the pipeline enters `Pending` state and you can review with `sevens accept` or `sevens reject`.
+```
+sevens accept "Decision Making"
+```
 
-### When to use agent mode vs standalone
+Submit supports output types: `ops` (create/edit operations), `suggestions`,
+and `text`.
 
-**Standalone** (`sevens apply`): You have an API key configured. Sevens calls the LLM directly. Simpler workflow.
+You can also inject a result into an existing pipeline:
 
-**Agent mode** (`sevens prepare` / `sevens submit`): You're already in an AI assistant session. The assistant reads the checklist, does the work, and submits. Useful when:
-- Your AI access is through a workplace tool (no separate API key)
-- You want the assistant to have additional context beyond what sevens gathers
-- You want to use a specific model that sevens doesn't directly support
+```
+sevens submit "Decision Making" --function decompose --output suggestions --pipeline abc123 --response-file response.json
+```
+
+For multi-step functions, use `--step` to target a specific step:
+
+```
+sevens submit "Decision Making" --function decompose --step suggest --output suggestions --response-file suggestions.json
+```
+
+The `prepare` output includes the exact `submit` commands with `--step` flags
+for each step.
 
 ---
 
-## Chapter 8: Configuration
+## 15. Export and Harvest
 
-### Global config
+These commands bridge sevens with GUI LLMs (ChatGPT, Claude web, etc.) via
+copy-paste.
 
-Location: `~/.config/sevens/config.edn`
+### Export
 
-```edn
-{:llm {:provider "anthropic"
-       :model "claude-sonnet-4-20250514"
-       :api-key-env "ANTHROPIC_API_KEY"}
- :models {"fast" {:model "claude-haiku-4-20250514"}
-          "capable" {:model "claude-sonnet-4-20250514"}
-          "powerful" {:model "claude-opus-4-20250514"}}
- :backend "anthropic"
- :cost-threshold 0.01
- :theme "dark"
- :system-prompt "You are analyzing a personal knowledge graph..."
- :context-files ["~/notes/style-guide.md"]}
-```
-
-If this file doesn't exist, sevens uses sensible defaults (Anthropic, Claude Sonnet, API key from `ANTHROPIC_API_KEY` environment variable).
-
-### Root config
-
-Location: `.sevens.edn` in each root directory
-
-```edn
-{:path "~/Documents/commons"
- :alias "commons"
- :max-chars 5000}
-```
-
-Created by `sevens init`. The `:path` and `:alias` are set at init time. `:max-chars` is optional and sets the character limit validation threshold.
-
-### Model profiles
-
-Define named profiles in the global config under `:models`:
-
-```edn
-{:models {"fast" {:model "claude-haiku-4-20250514"}
-          "capable" {:model "claude-sonnet-4-20250514"}
-          "powerful" {:model "claude-opus-4-20250514"}}}
-```
-
-Use them:
+Renders node context as a Markdown document suitable for pasting into a GUI
+LLM:
 
 ```
-sevens apply notice "The Commons" --model fast
-sevens apply decompose "The Commons" --model powerful
+sevens export "Decision Making"
 ```
 
-Profiles inherit unset fields from the default `:llm` config. So a profile that only specifies `:model` inherits the provider and API key.
+```
+## Context: Decision Making
 
-### Backend configuration
+Parent: The Commons
+Children: (none)
 
-Sevens supports three backend types:
+### Decision Making
 
-**anthropic** -- direct API calls to Anthropic (default):
-```edn
-{:llm {:provider "anthropic"
-       :model "claude-sonnet-4-20250514"
-       :api-key-env "ANTHROPIC_API_KEY"}}
+How groups make binding decisions...
+
+---
+This context was exported from a knowledge graph managed by sevens.
+Node: Decision Making | Shape: sevens/neighborhood
 ```
 
-**codex** -- delegates to the Codex CLI:
-```edn
-{:backends {"codex" {:type "codex"
-                     :command "codex"
-                     :generated-conf-dir "~/.config/sevens/generated/codex"}}}
-```
-
-**claude** -- delegates to Claude Code CLI:
-```edn
-{:backends {"claude" {:type "claude"
-                      :command "claude"
-                      :generated-conf-dir "~/.config/sevens/generated/claude"}}}
-```
-
-Generate MCP configs for CLI backends:
+With a function's instruction as framing:
 
 ```
-sevens config generate codex
-sevens config generate claude
-sevens config generate all
+sevens export "Decision Making" --function notice --shape sevens/subtree
 ```
 
-Switch backends per command:
+Includes the function's system prompt and rendered prompt template in the
+export, plus uses the subtree shape for deeper context.
+
+### Harvest
+
+Generates a structuring prompt that tells the GUI LLM how to format its
+response so it can be imported back:
 
 ```
-sevens apply notice "The Commons" --backend codex
+sevens harvest "Decision Making" --function decompose
 ```
 
-Or in the REPL:
-
 ```
-.backend codex
-```
+# Instructions for structuring your response
 
-### Cost thresholds
+Please structure your response as a JSON object that can be imported into sevens.
+The target node is: **Decision Making**
 
-The `:cost-threshold` setting (in USD) controls automatic approval:
+## Output format
 
-```edn
-{:cost-threshold 0.01}
-```
+Respond with a JSON object containing an "ops" field...
 
-Operations below this cost are auto-approved without prompting. Set to `0` to always prompt.
+## Importing the response
 
-### Context files
+After receiving the response, save the JSON to a file and run:
 
-Global context files are injected into every AI call:
-
-```edn
-{:context-files ["~/notes/style-guide.md" "~/notes/project-context.md"]}
+    sevens submit "Decision Making" --function decompose --output ops --response-file response.json
 ```
 
-Functions can also declare their own context files.
+### The copy-paste workflow
 
-### Viewing configuration
+1. `sevens export "Node" --function notice` — copy context into GUI LLM
+2. Paste the export and converse with the GUI LLM
+3. `sevens harvest "Node" --function notice` — copy the structuring prompt
+4. Paste the harvest prompt to get structured output
+5. Save the JSON response to a file
+6. `sevens submit "Node" --function notice --output text --response-file response.json`
+
+---
+
+## 16. Session and Focus
+
+### Focus
+
+Pin a node as the active focus for subsequent commands:
+
+```
+sevens focus "Decision Making"
+```
+
+```
+[focus] Decision Making
+  parent: The Commons
+  siblings: Resource Allocation
+
+Use '.' as node title in other commands to reference this node.
+```
+
+Now `.` works as a shorthand:
+
+```
+sevens apply notice .
+sevens walk .
+sevens log .
+```
+
+Focus persists across CLI invocations and is automatically restored when
+starting the REPL.
+
+### Focus with includes
+
+```
+sevens focus "Decision Making" --include "Resource Allocation","Collective Action"
+```
+
+The included nodes are added to the context of every AI function call.
+
+### Unfocus
+
+```
+sevens unfocus
+```
+
+### Status
+
+```
+sevens status
+```
+
+```
+Focused: Decision Making
+Root:    /Users/you/Documents/commons
+Since:   2026-04-12T14:30:00Z
+```
+
+---
+
+## 17. Configuration
+
+### config.edn
+
+Lives at `~/.config/sevens/config.edn`. All fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `:llm` | map | `{:provider :model :api-key-env :api-key}` |
+| `:models` | map | Named profiles: `{"fast" {:model "..."}}` |
+| `:backend` | string | Default backend: `"anthropic"`, `"claude"`, `"codex"` |
+| `:backends` | map | Backend configs: `{"claude" {:type :command :generated-conf-dir}}` |
+| `:cost-threshold` | number | USD threshold for auto-approval |
+| `:theme` | string | `"light"` or `"dark"` |
+| `:system-prompt` | string | Global system prompt for all LLM calls |
+| `:context-files` | vector | Files injected into every AI call |
+
+### config init
+
+```
+sevens config init
+```
+
+Creates default config, seeds functions and types.
+
+### config show
 
 ```
 sevens config show
 ```
 
+Displays current backend, model, MCP servers, and configured backends.
+
+### config generate
+
 ```
-Backend: anthropic
-Model:   claude-sonnet-4-20250514
-MCP Servers (2):
-  filesystem -- File system access
-  fetch -- Web fetch
+sevens config generate claude
+sevens config generate codex
+sevens config generate all
+```
+
+Generates MCP configs for CLI backends from `capabilities.edn`.
+
+### Model profiles
+
+Use profiles by name:
+
+```
+sevens apply notice "Node" --model fast
+sevens apply notice "Node" --model powerful
+```
+
+Or use a raw model ID:
+
+```
+sevens apply notice "Node" --model claude-opus-4-20250514
 ```
 
 ---
 
-## Chapter 9: The Triple Store
+## 18. The Triple Store
 
 ### Everything is triples
 
-Every piece of information in sevens is stored as a triple: `(subject, predicate, object)`. Node content, tree structure, wiki-links, block structure, session state, operation logs -- all the same shape.
+Every fact in sevens is stored as a (subject, predicate, object) triple.
+The SQLite database is the source of truth at runtime.
 
-Subject strings encode identity:
+### Query
 
-```
-node:<6-byte-hash>:<title>     for nodes
-block:<6-byte-hash>:<title>:<path>   for blocks
-session:current                for the active session
-log:<unique-id>                for log entries
-pipeline:<hash>:<timestamp>:<random>  for pipeline state
-```
-
-### Querying with sevens query
-
-The `query` command runs SQL directly against the triples table:
+Run SQL directly against the triples table:
 
 ```
-sevens query "SELECT subject, object FROM triples WHERE predicate = 'node/title'"
+sevens query "SELECT subject, predicate, object FROM triples WHERE predicate = 'node/title'"
 ```
 
-Template variables are available:
-- `{{root}}` -- the current root directory path
-- `{{target}}` / `{{focused}}` -- the focused node title (from `sevens focus`)
-
-Find all wiki-links:
+Template variables are substituted:
 
 ```
-sevens query "SELECT t1.object AS source, t2.object AS target
-  FROM triples t1
-  JOIN triples t2 ON t1.subject = t2.subject
-  WHERE t1.predicate = 'node/title'
-  AND t2.predicate = 'node/link'"
+sevens query "SELECT predicate, object FROM triples WHERE subject = (SELECT subject FROM triples WHERE predicate = 'node/title' AND object = {{target}})"
 ```
 
-Find nodes with high character counts:
+`{{root}}` substitutes the current root path. `{{target}}` and `{{focused}}`
+substitute the focused node title from the active session.
 
-```
-sevens query "SELECT t1.object AS title, CAST(t2.object AS INTEGER) AS chars
-  FROM triples t1
-  JOIN triples t2 ON t1.subject = t2.subject
-  WHERE t1.predicate = 'node/title'
-  AND t2.predicate = 'node/char-count'
-  ORDER BY chars DESC LIMIT 10"
-```
+### Predicate vocabulary
 
-Find operation history:
+| Namespace | Examples | Scope |
+|-----------|----------|-------|
+| `node/*` | `node/title`, `node/parent`, `node/content`, `node/file-path`, `node/root`, `node/role`, `node/char-count` | Node-level graph structure. Note: `node/parent` stores the full subject reference (`node:<hash>:<title>`), not just the title. |
+| `block/*` | `block/content`, `block/kind`, `block/level`, `block/path`, `block/scope` | Block-level structure within nodes |
+| `meta/*` | `meta/status`, `meta/tags`, `meta/deadline`, `meta/assignee` | User-defined semantic predicates from frontmatter and orthography |
+| `session/*` | `session/focus`, `session/root`, `session/started` | Active focus session |
+| `log/*` | `log/event`, `log/function`, `log/timestamp`, `log/node` | Operation audit trail |
+| `fn/*` | `fn/name`, `fn/output`, `fn/persona`, `fn/context-policy` | Function definitions (future EDN projection) |
+| `step/*` | `step/input`, `step/output`, `step/gate`, `step/prompt` | Pipeline step definitions |
+| `type/*` | `type/name`, `type/extends`, `type/requires`, `type/optional` | Type definitions |
 
-```
-sevens query "SELECT t1.object AS event, t2.object AS function, t3.object AS node
-  FROM triples t1
-  JOIN triples t2 ON t1.subject = t2.subject
-  JOIN triples t3 ON t1.subject = t3.subject
-  WHERE t1.predicate = 'log/event'
-  AND t2.predicate = 'log/function'
-  AND t3.predicate = 'log/node'
-  ORDER BY t1.subject DESC LIMIT 20"
-```
+### Subject identity
 
-### The predicate vocabulary
-
-**Node predicates:**
-
-| Predicate | Multiplicity | Description |
-|---|---|---|
-| `node/title` | functional | Human-readable name |
-| `node/parent` | functional | Single parent (inverse: children) |
-| `node/content` | functional | Textual body |
-| `node/file` | functional | Path to source file |
-| `node/root` | functional | Root directory this node belongs to |
-| `node/char-count` | functional | Character count |
-| `node/link` | relational | Cross-reference to another node |
-| `node/role` | relational | Named role within sibling set |
-
-**Block predicates:**
-
-| Predicate | Multiplicity | Description |
-|---|---|---|
-| `block/node` | functional | The document node this block belongs to |
-| `block/root` | functional | Root directory |
-| `block/content` | functional | Block text |
-| `block/scope` | functional | Heading scope containing this block |
-| `block/kind` | functional | heading, paragraph, list-item, task |
-| `block/path` | functional | Structural position (e.g., h.1, p.2) |
-
-**Session predicates:**
-
-| Predicate | Description |
-|---|---|
-| `session/focus` | Primary node of attention |
-| `session/include` | Additional context nodes |
-| `session/exclude` | Nodes excluded from context |
-| `session/started` | Session start time |
-
-**Log predicates:**
-
-| Predicate | Description |
-|---|---|
-| `log/event` | Event type (applied, rejected, reverted, etc.) |
-| `log/function` | Which function was used |
-| `log/node` | Target node |
-| `log/step` | Which step produced this entry |
-| `log/timestamp` | When it happened |
-| `log/commit` | Git commit hash |
-| `log/files-created` | Files created by this operation |
-| `log/files-edited` | Files edited by this operation |
-
-### Path composition (morphism walks)
-
-Functions gather context by composing predicate paths. The composition `["node/parent", "node/parent~"]` means:
-
-1. From the target, follow `node/parent` forward (get the parent)
-2. From the parent, follow `node/parent~` (inverse -- get all children of the parent)
-3. Exclude self
-
-This gives you siblings. The composition is the same mechanism as arrow composition in category theory: if you can follow arrow A from X to Y and arrow B from Y to Z, composing A then B gets you from X to Z.
-
-Common compositions:
-- **Parent**: `["node/parent"]`
-- **Children**: `["node/parent~"]`
-- **Siblings**: `["node/parent", "node/parent~"]` (exclude self)
-- **Grandparent**: `["node/parent", "node/parent"]`
-- **Cousins**: `["node/parent", "node/parent", "node/parent~", "node/parent~"]`
+Node subjects are deterministic: `node:{root}:{title}`. Block subjects
+include the node subject and the block path. This means subjects are stable
+across syncs as long as the title doesn't change.
 
 ---
 
-## Chapter 10: Architecture
-
-### The concept design approach
-
-Sevens is designed using Daniel Jackson's Concept Design framework. Each major piece of functionality is a "concept" with its own state, actions, and operational principle. Concepts compose through explicit synchronization rules.
-
-The concepts are:
-- **Graph** -- bare triple store (CRUD on triples)
-- **GraphOps** -- predicate metadata, path composition, functional vs. relational predicates
-- **KnowledgeBase** -- the PKM domain model: nodes, blocks, sessions, logs, structural validation
-- **Function** -- typed transformations, pipeline state machine, gates, control flow
-- **Projection** (contract) -- faithful round-trip between graph state and a human-readable medium
+## 19. Architecture
 
 ### Layer model
 
-```
-triple          Layer 1: bare triple store
-  |
-graphops        Layer 2: predicate metadata, path composition
-  |
-kb              Layer 3: PKM domain model
-  |             |
-function        projection/md
-```
+Sevens is organized into four layers:
 
-Each layer depends only on layers below. The CLI (`cmd/sevens`) and REPL (`internal/repl`) sit above everything and coordinate syncs between concepts.
+1. **Triple store** — the source of truth. All facts are triples in SQLite.
+2. **Knowledge base (KB)** — queries and writes over the triple store. Walk,
+   overview, validation, log, session management.
+3. **Projection** — bidirectional mapping between the triple store and external
+   representations. The Markdown projection syncs `.md` files. The EDN
+   projection (planned) syncs config files.
+4. **Functions** — AI and deterministic operations that read from and write to
+   the graph through the projection layer.
 
-**Layer 1 (triple):** Stores and retrieves triples. No domain knowledge. Idempotent assertions, retractions, queries by subject/predicate/object.
+### Concept design
 
-**Layer 2 (graphops):** Knows that predicates have properties (functional vs. relational, invertible, symmetric, transitive). Provides `set` (replace for functional predicates), `compose` (walk predicate paths), and `reachable` (transitive closure).
+The system is organized around five concepts:
 
-**Layer 3 (kb):** The PKM domain. Defines the predicate vocabulary (`node/title`, `node/parent`, `block/content`, etc.), subject identity scheme (`node:<hash>:<title>`), structural queries (walk, overview, children, siblings), validation (7+/-2 constraint, orphan detection), sessions, and logging.
+- **Graph** — the triple store and queries over it
+- **Projection** — bidirectional Markdown/EDN sync
+- **Function** — AI operations with typed inputs and outputs
+- **Pipeline** — multi-step composition with suspension and approval
+- **Session** — focus, includes, model/backend preferences
 
-**Function:** Typed transformations on the knowledge base. Defines functions, steps, gates, pipelines, and the state machine. Delegates actual computation to backends (LLM, deterministic, agent).
+### Projections
 
-**Projection:** The contract for reading and writing between the graph and a human-editable medium. The markdown implementation (`projection/md`) handles file I/O, frontmatter parsing, wiki-link extraction, block parsing, git operations, and block identity tracking.
+**Markdown projection**: `.md` files are parsed into triples. Frontmatter
+becomes `node/*` and `meta/*` predicates. Headings and list items become
+`block/*` predicates. Writing back renders triples into Markdown with
+frontmatter.
 
-### The projection contract
+**EDN projection** (direction): `.edn` config files for types, functions,
+and value models are designed to sync into the triple store and be queryable
+at runtime. Currently, these are loaded from files directly; the projection
+into triples is the planned next step.
 
-The projection guarantees round-trip fidelity:
-- **render then parse**: produces the same graph state (modulo whitespace)
-- **parse then render**: produces the same presentational form (modulo normalization)
+### The EDN DSL
 
-The `sync` operation reads files from disk, parses them into triples, reconciles against current graph state, and applies the changeset. The `write` operation renders graph state back to files.
+Function definitions, type definitions, and value models are all expressed in
+EDN. The convention is:
 
-Currently only the markdown format is implemented. The contract is designed to support other formats (org-mode, web app) without changing the graph or function layers.
-
-### Category K connections
-
-The design is informed by an epistemic framework called Category K (see `docs/design/CATEGORY-K.md`). The key ideas that shaped sevens:
-
-- **Triples as binary relations**: the axiom "knowledge is synchronic binary relation" maps directly to the triple store
-- **Dumb morphisms, smart objects**: predicates are simple edges; all semantic weight is in the nodes (the intermediary principle)
-- **Arrow composition**: path specs compose predicates the same way arrows compose in a category
-- **Channel 1 vs Channel 2**: analysis functions (notice, challenge) are Channel 1 (recognition within existing structure); structure functions (decompose, elaborate) are Channel 2 (new information entering the graph)
-- **Gates as T-crossing**: the pipeline suspension model makes the diachronic transition explicit -- the AI proposes, the human approves, the partition changes
-- **Types as subgraph shapes**: a "node" is recognized by its predicate pattern, not a type field
+- Keywords (`:create`, `:text`) are built-in language forms
+- Symbols (`task`, `project`) are user-defined references
+- Vectors are applied forms and match clauses: `[:create task]`
+- Maps are named bindings
+- Strings are literal values and templates with `{{var}}` interpolation
 
 ---
 
-## Quick Reference
+## 20. Quick Reference
 
-### Common workflows
+### CLI commands
 
-**Start a new project:**
-```
-sevens init ~/Documents/project --alias project
-# create markdown files with title frontmatter
-sevens sync
-sevens overview
-```
+| Command | Usage | Description |
+|---------|-------|-------------|
+| `init` | `sevens init [path] [--alias name]` | Initialize a new root |
+| `sync` | `sevens sync [--root dir]` | Scan markdown and rebuild database |
+| `overview` | `sevens overview [--edn]` | Print full tree |
+| `walk` | `sevens walk <title> [--shape S] [--edn]` | Walk a node's neighborhood |
+| `tree` | `sevens tree <title> [--edn]` | Show subtree rooted at node |
+| `blocks` | `sevens blocks <title> [--edn]` | List block structure |
+| `diff-blocks` | `sevens diff-blocks <title> [--unchanged] [--edn]` | Block-level changes since sync |
+| `inbox` | `sevens inbox [title]` | Show children summaries |
+| `extract-block` | `sevens extract-block <source> <path> [title] [-p parent]` | Extract block to new node |
+| `roots` | `sevens roots` | List registered roots |
+| `search` | `sevens search <query>` | Search titles and content |
+| `query` | `sevens query <sql>` | Run SQL against triple store |
+| `apply` | `sevens apply <fn> <title> [--model M] [--dry-run] [--backend B]` | Apply a function |
+| `discuss` | `sevens discuss <title> [-i] [--dry-run] [--model M] [--backend B]` | Discussion mode |
+| `accept` | `sevens accept <title> [--with feedback] [--backend B]` | Accept pending suggestions |
+| `reject` | `sevens reject <title>` | Reject pending suggestions |
+| `revert` | `sevens revert <title>` | Undo last applied operation |
+| `pending` | `sevens pending` | List all pending suggestions |
+| `functions` | `sevens functions` | List available functions with signatures |
+| `types` | `sevens types` | List defined types |
+| `types check` | `sevens types check <title>` | Check type conformance |
+| `types nodes` | `sevens types nodes <type>` | Find conforming nodes |
+| `templates` | `sevens templates` | List deterministic templates |
+| `define` | `sevens define <name> --description "..."` | Define a new function |
+| `focus` | `sevens focus <title> [--include ...] [--exclude ...]` | Pin active focus |
+| `unfocus` | `sevens unfocus` | Clear focus |
+| `status` | `sevens status` | Show focus session |
+| `log` | `sevens log <title>` | Show operation log |
+| `prepare` | `sevens prepare <fn> <title>` | Compile function to agent checklist |
+| `submit` | `sevens submit <title> --function F --output T --response-file F` | Submit agent results |
+| `new` | `sevens new [title] [-t template] [-p parent] [--set k=v]` | Create a node |
+| `capture` | `sevens capture [title] [--summary S]` | Quick inbox capture |
+| `instantiate` | `sevens instantiate <template> [args] [-p parent] [-a target] [--set k=v]` | Run a template |
+| `export` | `sevens export <title> [--shape S] [--function F]` | Export context for GUI LLM |
+| `harvest` | `sevens harvest <title> [--function F] [--type T]` | Generate structuring prompt |
+| `config init` | `sevens config init` | Create default config |
+| `config show` | `sevens config show` | Show current config |
+| `config generate` | `sevens config generate <backend>` | Generate MCP configs |
+| `repl` | `sevens repl [title]` | Start interactive REPL |
 
-**Analyze and grow:**
-```
-sevens focus "Root Node"
-sevens apply notice .
-sevens apply decompose .
-sevens accept . --with "also add a section about X"
-sevens accept .
-```
+### REPL commands
 
-**Daily capture:**
-```
-sevens new --template daily-note
-sevens capture "quick thought about Y"
-```
-
-**Interactive exploration:**
-```
-sevens repl "Root Node"
-# navigate, apply functions, discuss, all in one session
-```
-
-**Review pending:**
-```
-sevens pending
-sevens accept "Node Title"
-# or
-sevens reject "Node Title"
-```
-
-**Undo a mistake:**
-```
-sevens revert "Node Title"
-```
+| Command | Description |
+|---------|-------------|
+| `<title>` | Focus node by title |
+| `focus <title>` / `f <title>` | Explicit focus |
+| `..` / `up` | Move to parent |
+| `root` | Clear focus |
+| `child <n>` / `c <n>` | Focus Nth child |
+| `sibling <n>` / `s <n>` | Focus Nth sibling |
+| `<n>` | Focus Nth item from last list |
+| `walk` | Walk focused node |
+| `overview` | Full tree |
+| `children` | List children |
+| `siblings` | List siblings |
+| `inbox [title]` | Children summaries |
+| `blocks [title]` | Block structure |
+| `diff-blocks` | Block changes |
+| `extract-block [path] [title]` | Extract block to new node |
+| `search <query>` | Search |
+| `pending` | List pending |
+| `log` | Operation log |
+| `sync` | Re-sync |
+| `new <title>` | Create child node |
+| `<function>` | Apply function to focus |
+| `accept` | Accept pending |
+| `reject` | Reject pending |
+| `revert` | Revert last operation |
+| `discuss` | Start discussion |
+| `note` | Quick note mode |
+| `templates` | List templates |
+| `capture [title]` | Inbox capture |
+| `instantiate <template> [args]` | Run template |
+| `.info` | Session info |
+| `.model <name>` | Switch model |
+| `.backend <name>` | Switch backend |
+| `.theme light\|dark` | Switch theme |
+| `.dry` | Toggle dry-run |
+| `.include <title>...` | Add context nodes |
+| `.include clear` | Clear includes |
+| `.exclude <title>` | Remove include |
+| `.functions` / `.fns` | List functions |
+| `.clear` | Clear screen |
+| `.help` / `.h` | Help |
+| `.quit` / `.q` / `.exit` | Exit |

@@ -95,7 +95,7 @@ func (k *KB) SaveCurrentSession(ctx context.Context, root, nodeTitle string, inc
 	k.graph.Store().RetractBySubject(ctx, CurrentSessionSubject)
 
 	triples := []triple.Triple{
-		{Subject: CurrentSessionSubject, Predicate: "session/root", Object: root},
+		{Subject: CurrentSessionSubject, Predicate: PredSessionRoot, Object: root},
 		{Subject: CurrentSessionSubject, Predicate: PredSessionFocus, Object: nodeTitle},
 		{Subject: CurrentSessionSubject, Predicate: PredSessionStarted, Object: time.Now().UTC().Format(time.RFC3339)},
 	}
@@ -119,7 +119,7 @@ func (k *KB) LoadCurrentSession(ctx context.Context) (*Session, error) {
 		return nil, nil
 	}
 
-	root, _, _ := k.graph.Lookup(ctx, CurrentSessionSubject, "session/root")
+	root, _, _ := k.graph.Lookup(ctx, CurrentSessionSubject, PredSessionRoot)
 	started, _, _ := k.graph.Lookup(ctx, CurrentSessionSubject, PredSessionStarted)
 	includes, _ := k.graph.Store().BySubjectPredicate(ctx, CurrentSessionSubject, PredSessionInclude)
 	excludes, _ := k.graph.Store().BySubjectPredicate(ctx, CurrentSessionSubject, PredSessionExclude)

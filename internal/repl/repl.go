@@ -46,10 +46,7 @@ type REPL struct {
 	globalCfg          config.GlobalConfig
 	mode               Mode
 	noteLines          []string // buffer for note mode
-	discussNode        string   // "Discussion - <Title>" when in discussion mode
-	discussFileCreated bool     // true if the discussion file was created during this session
-	discussFilePath    string   // absolute path to the discussion file
-	discussCommit      string   // short commit hash if a commit was made during enterDiscussion
+	discussState       *DiscussionState // active discussion state (nil when not in discussion)
 	kbInstance         *kb.KB   // new architecture KB
 
 	// Injected interfaces (implementations provided by CLI layer).
@@ -57,6 +54,7 @@ type REPL struct {
 	pipelineR  PipelineRunner
 	applyR     ApplyRunner
 	templateR  TemplateRunner
+	discussR   DiscussionRunner
 
 	rl *readline.Instance
 }
@@ -87,6 +85,11 @@ func WithApplyRunner(a ApplyRunner) Option {
 // WithTemplateRunner injects the template operations implementation.
 func WithTemplateRunner(t TemplateRunner) Option {
 	return func(r *REPL) { r.templateR = t }
+}
+
+// WithDiscussionRunner injects the discussion workflow implementation.
+func WithDiscussionRunner(d DiscussionRunner) Option {
+	return func(r *REPL) { r.discussR = d }
 }
 
 // New creates a REPL and initialises readline. focusNode may be "".
@@ -422,13 +425,8 @@ func (r *REPL) runPipeline(nodeTitle string, fnDef *FunctionDef, startStep int, 
 	ctxFiles = append(ctxFiles, globalCfg.ContextFiles...)
 	ctxFiles = append(ctxFiles, fnDef.ContextFiles...)
 
-	// Get node context files from walk.
-	if r.graphQ != nil {
-		walk, err := r.graphQ.BuildWalk(r.root, nodeTitle, 1)
-		if err == nil && walk != nil {
-			ctxFiles = append(ctxFiles, walk.Node.ContextFiles...)
-		}
-	}
+	// Note: context files from frontmatter are no longer carried on WalkNode.
+	// They are resolved at the adapter layer if needed.
 
 	contextStr := ""
 	if r.applyR != nil {
@@ -448,14 +446,14 @@ func (r *REPL) runPipeline(nodeTitle string, fnDef *FunctionDef, startStep int, 
 		if r.graphQ == nil {
 			continue
 		}
-		incWalk, err := r.graphQ.BuildWalk(r.root, inc, 0)
+		incWalk, err := r.graphQ.BuildWalk(r.root, inc, "minimal")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s included node %q: %v\n",
 				ui.Warning.Render("[warn]"), inc, err)
 			continue
 		}
 		contextStr += fmt.Sprintf("<included-node title=%q>\n%s\n</included-node>\n\n",
-			inc, incWalk.Node.Content)
+			inc, incWalk.Target.Content)
 	}
 
 	var be backend.Backend

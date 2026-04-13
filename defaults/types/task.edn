@@ -1,0 +1,11 @@
+{:name "task"
+ :extends "create"
+ :predicates {:required ["status" "deadline"]
+              :optional ["priority" "assignee" "estimate"]}
+ :structure {:parent-type "project"
+             :children {:min 0 :max 5}}
+ :projection {:frontmatter ["status" "deadline" "priority" "assignee"]
+              :orthography {"status"   {:value-model "task-status"}
+                            "assignee" {:signifier "@" :value-model "person"}
+                            "priority" {:signifier "!" :value-model "priority"}
+                            "estimate" {:signifier "~" :value-model "duration"}}}}

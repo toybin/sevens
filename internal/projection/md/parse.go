@@ -6,6 +6,7 @@ package md
 
 import (
 	"bufio"
+	"sort"
 	"strings"
 )
 
@@ -17,6 +18,14 @@ type ParsedBlock struct {
 	Level        int      // heading level (1-6), 0 for non-headings
 	Signifier    string   // task signifier e.g. "x", "!!"
 	HeadingChain []string // scope: list of headings above this block
+
+	// SourceStart and SourceStop are byte offsets into the original source
+	// passed to ExtractBlocks. SourceStart is the first byte of the block
+	// (including any # or - prefix). SourceStop is one past the last byte
+	// (i.e. the exclusive end, including the trailing newline if present).
+	// Both are zero for blocks built outside of ExtractBlocks.
+	SourceStart int
+	SourceStop  int
 }
 
 // ParsedNode is a fully parsed markdown file.
@@ -29,6 +38,7 @@ type ParsedNode struct {
 	SiblingRole  string
 	IncludeGroup bool
 	Blocks       []ParsedBlock
+	Extra        map[string]string // arbitrary frontmatter fields
 }
 
 // Frontmatter is the YAML header of a markdown file.
@@ -37,6 +47,7 @@ type Frontmatter struct {
 	Parent       string
 	SiblingRole  string
 	IncludeGroup bool
+	Extra        map[string]string // arbitrary key-value pairs not in the known set
 }
 
 // ParseFrontmatter extracts frontmatter fields from the YAML block
@@ -50,6 +61,13 @@ func ParseFrontmatter(content string) (Frontmatter, string) {
 	lines := strings.Split(content, "\n")
 
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		// No frontmatter — try H1 fallback on the full content.
+		for _, line := range lines {
+			if strings.HasPrefix(line, "# ") {
+				fm.Title = strings.TrimPrefix(line, "# ")
+				break
+			}
+		}
 		return fm, content
 	}
 
@@ -69,6 +87,8 @@ func ParseFrontmatter(content string) (Frontmatter, string) {
 	for _, line := range lines[1:closeIdx] {
 		key, val := parseYAMLLine(line)
 		switch key {
+		case "":
+			continue
 		case "title":
 			fm.Title = val
 		case "parent":
@@ -77,11 +97,28 @@ func ParseFrontmatter(content string) (Frontmatter, string) {
 			fm.SiblingRole = val
 		case "include-group":
 			fm.IncludeGroup = val == "true"
+		default:
+			if fm.Extra == nil {
+				fm.Extra = make(map[string]string)
+			}
+			fm.Extra[key] = val
 		}
 	}
 
 	body := strings.Join(lines[closeIdx+1:], "\n")
 	body = strings.TrimLeft(body, "\n")
+
+	// H1 fallback: if frontmatter has no title, scan the body for the first
+	// ATX-style H1 heading (a line starting with "# ").
+	if fm.Title == "" {
+		for _, line := range strings.Split(body, "\n") {
+			if strings.HasPrefix(line, "# ") {
+				fm.Title = strings.TrimPrefix(line, "# ")
+				break
+			}
+		}
+	}
+
 	return fm, body
 }
 
@@ -100,6 +137,17 @@ func RenderFrontmatter(fm Frontmatter) string {
 	}
 	if fm.IncludeGroup {
 		b.WriteString("include-group: true\n")
+	}
+	// Render extra fields in sorted order for determinism.
+	if len(fm.Extra) > 0 {
+		keys := make([]string, 0, len(fm.Extra))
+		for k := range fm.Extra {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			b.WriteString(k + ": " + fm.Extra[k] + "\n")
+		}
 	}
 	b.WriteString("---\n")
 	return b.String()

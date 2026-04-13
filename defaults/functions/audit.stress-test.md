@@ -18,8 +18,6 @@ Focus on load-bearing claims — the ones the argument depends on. Skip style ni
 </prior-observation>
 
 <output-spec>
-Return plain text — your challenges, not JSON.
-
 Numbered list, up to 10 items. Each item:
 1. Claim: "[exact quote]"
    Failure mode: [why it fails, for whom, under what conditions]
