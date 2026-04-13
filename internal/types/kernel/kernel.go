@@ -241,18 +241,25 @@ func (p PrimitiveType) LocalRefinements() []Refinement { return nil }
 func (p PrimitiveType) isTypeDef()                     {}
 
 // DerivedType is the TypeDef for a user-defined type extending another.
+//
+// ChildType is an optional type-family declaration: "nodes of this
+// type have children of type X." Used by the function layer to
+// resolve input-dependent output types (Node<T> → Node<child-of<T>>).
+// Empty TypeName means no child-type is declared at this level; the
+// lookup walks the :extends chain until it finds one (or fails).
 type DerivedType struct {
 	TName       TypeName
 	ParentName  TypeName
+	ChildType   TypeName // optional; empty = not declared
 	ExtraFields []FieldSpec
 	Refinements []Refinement
 }
 
-func (d DerivedType) Name() TypeName                  { return d.TName }
-func (d DerivedType) Parent() TypeName                { return d.ParentName }
-func (d DerivedType) LocalFields() []FieldSpec        { return d.ExtraFields }
-func (d DerivedType) LocalRefinements() []Refinement  { return d.Refinements }
-func (d DerivedType) isTypeDef()                      {}
+func (d DerivedType) Name() TypeName                 { return d.TName }
+func (d DerivedType) Parent() TypeName               { return d.ParentName }
+func (d DerivedType) LocalFields() []FieldSpec       { return d.ExtraFields }
+func (d DerivedType) LocalRefinements() []Refinement { return d.Refinements }
+func (d DerivedType) isTypeDef()                     {}
 
 // === Registry ==========================================================
 
@@ -329,6 +336,49 @@ func (r *Registry) IsSubtype(sub, super TypeName) bool {
 		}
 	}
 	return false
+}
+
+// ChildTypeOf returns the type-family entry "children of this type
+// are of type X" for the given name. Walks the :extends chain until
+// it finds a DerivedType with ChildType set, or returns ("", false)
+// if no declaration exists in the chain.
+//
+// This is the runtime half of input-dependent output type resolution:
+// a function declared as `:output :child-of-input` will call this at
+// dispatch time with the target's most-specific type.
+func (r *Registry) ChildTypeOf(name TypeName) (TypeName, bool) {
+	td, ok := r.types[name]
+	if !ok {
+		return "", false
+	}
+	for {
+		d, isDerived := td.(DerivedType)
+		if !isDerived {
+			return "", false // primitive — no child type
+		}
+		if d.ChildType != "" {
+			return d.ChildType, true
+		}
+		parent, ok := r.types[d.ParentName]
+		if !ok {
+			return "", false
+		}
+		td = parent
+	}
+}
+
+// SubtypesOf returns every registered type that is a subtype of name
+// (including name itself). Used by the load-time check for
+// input-dependent output pickers: every concrete input must have a
+// resolvable child type. Order is unspecified.
+func (r *Registry) SubtypesOf(name TypeName) []TypeName {
+	var out []TypeName
+	for n := range r.types {
+		if r.IsSubtype(n, name) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // RootPrimitive returns the primitive at the root of name's extends
