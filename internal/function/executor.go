@@ -402,6 +402,15 @@ func (e *Executor) executeStep(ctx context.Context, root string, fn *Function, p
 	if env != nil {
 		switch {
 		case len(env.Ops) > 0:
+			// Validate ops against the primitive schema BEFORE they flow
+			// downstream. This rejects malformed edits (empty file,
+			// missing old_text, etc.) loudly at the parse boundary
+			// instead of silently slug-falling-back to untitled.md.
+			if verr := ValidateOps(env.Ops); verr != nil {
+				return nil, fmt.Errorf(
+					"step %q: LLM produced invalid %s output: %w",
+					step.Name, shapeLabel(step.Output.Shape), verr)
+			}
 			result.Ops = env.Ops
 			result.IsText = false
 		case len(env.Suggestions) > 0:
