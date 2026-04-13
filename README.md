@@ -62,7 +62,7 @@ sevens walk "The Commons"
 | `sevens init [path]` | Initialize a new root (`--alias`, `--max-chars`) |
 | `sevens sync` | Scan markdown files and rebuild the database (`--root`) |
 | `sevens overview` | Print full tree (`--root`, `--edn`) |
-| `sevens walk <title>` | Show a node's content and neighborhood (`--root`, `--depth`, `--edn`) |
+| `sevens walk <title>` | Show a node's content and neighborhood (`--root`, `--shape`, `--edn`) |
 | `sevens tree <title>` | Show the subtree rooted at a node |
 | `sevens blocks <title>` | List block structure of a node |
 | `sevens diff-blocks <title>` | Show block-level changes since last sync (`--unchanged`) |
@@ -70,7 +70,7 @@ sevens walk "The Commons"
 | `sevens extract-block <source> <path> [title]` | Create a new node from a block (`--parent`) |
 | `sevens roots` | List all registered roots |
 | `sevens search <query>` | Search node titles and content |
-| `sevens query <sql>` | Run SQL against the triples store (supports `{{root}}`, `{{target}}`) |
+| `sevens query <sql>` | Run SQL against the triples store (`--all` for all roots; default scopes to current root) |
 
 ### Functions
 
@@ -163,6 +163,8 @@ sevens walk "The Commons"
 | `append-note` | Append a timestamped note to a target node |
 | `section-entry` | Insert a bullet under a specific heading |
 
+Run `sevens functions` to see available functions with Haskell-style type signatures showing each function's input/output contract (e.g., `node → text`, `node → [file]`).
+
 ## Function System
 
 Functions are defined as EDN files with optional markdown prompt sidecars. They live in two places:
@@ -231,7 +233,7 @@ Start an interactive session:
 sevens repl "The Commons"
 ```
 
-Navigate with `walk`, `..` (parent), `child 2`, `sibling 1`, or type a node title directly. Apply functions by name: type `notice` to run notice on the focused node. Use `.discuss` for interactive multi-turn conversation, `.note` for quick annotations, and `.help` for the full command list.
+Navigate with `walk`, `..` (parent), `child 2`, `sibling 1`, or type a node title directly. Apply functions by name: type `notice` to run notice on the focused node. Use `discuss` for interactive multi-turn conversation, `note` for quick annotations, and `.help` for the full command list.
 
 Key REPL commands:
 - **Navigation:** `<title>`, `..`, `child <n>`, `sibling <n>`, `root`
@@ -250,7 +252,7 @@ Key REPL commands:
  :models {"fast" {:model "claude-haiku-4-20250514"}
           "capable" {:model "claude-sonnet-4-20250514"}
           "powerful" {:model "claude-opus-4-20250514"}}
- :backend "anthropic"
+ :backend "claude"
  :cost-threshold 0.01
  :theme "dark"
  :context-files ["~/notes/style-guide.md"]}
@@ -272,7 +274,7 @@ Created by `sevens init` in each knowledge graph directory:
 Sevens supports multiple inference backends:
 
 ```edn
-{:backend "anthropic"
+{:backend "claude"
  :backends {"codex" {:type "codex"
                      :command "codex"
                      :generated-conf-dir "~/.config/sevens/generated/codex"}
@@ -301,8 +303,11 @@ kb              Layer 3: PKM domain model (nodes, blocks, sessions, logs)
   |
 function        Typed transformations, pipeline state machine
 projection/md   Markdown read/write, git, block tracking
+projection/edn  EDN config → triple store sync
+types           Node-level type system
   |
-cmd/sevens      CLI commands (sync orchestration)
+workflow        Orchestrates function execution and discussion
+cmd/sevens      CLI commands
 internal/repl   Interactive REPL
 ```
 
@@ -310,8 +315,6 @@ Each layer depends only on layers below it. The CLI and REPL are orchestration l
 
 For the full design documentation, see:
 
-- `docs/design/intent.md` -- what sevens is and why
-- `docs/design/concept-*.md` -- concept specifications (Graph, GraphOps, KnowledgeBase, Function, Projection)
-- `docs/design/syncs.md` -- how concepts compose
-- `docs/design/go-architecture.md` -- package structure
-- `docs/design/CATEGORY-K.md` -- the epistemic framework behind the design
+- `docs/ARCHITECTURE.md` -- package structure and layer overview
+- `docs/WALKTHROUGH.md` -- full tutorial from init to pipelines
+- `docs/design/concept-*.md` -- concept specifications (Graph, GraphOps, KnowledgeBase, Function, Projection, Types, Config)

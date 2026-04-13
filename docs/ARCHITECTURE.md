@@ -1,174 +1,219 @@
 # Architecture
 
-How the packages compose. Read alongside [API-MAP.md](API-MAP.md) (auto-generated via `scripts/api-map.sh`).
+How the packages compose. The codebase follows a 4-layer concept architecture derived from the concept design specs in `docs/design/`.
 
 ## Package dependency graph
 
 ```
 cmd/sevens
-  └─ internal/repl
-       ├─ internal/engine
-       │    ├─ internal/apply
-       │    ├─ internal/backend
-       │    └─ internal/graph
-       ├─ internal/apply
-       ├─ internal/backend
-       ├─ internal/graph
-       ├─ internal/store
-       └─ internal/ui
+  ├─ internal/workflow        (orchestration: composes concept actions)
+  │    ├─ internal/function
+  │    ├─ internal/kb
+  │    └─ internal/projection/md
+  ├─ internal/repl
+  │    ├─ internal/function
+  │    ├─ internal/kb
+  │    ├─ internal/projection/md
+  │    ├─ internal/backend
+  │    ├─ internal/config
+  │    └─ internal/ui
+  ├─ internal/function
+  │    ├─ internal/kb
+  │    ├─ internal/graphops
+  │    ├─ internal/triple
+  │    ├─ internal/types
+  │    ├─ internal/sevtypes
+  │    └─ internal/ednformat
+  ├─ internal/kb
+  │    ├─ internal/graphops
+  │    ├─ internal/triple
+  │    └─ internal/sevtypes
+  ├─ internal/projection/md
+  │    ├─ internal/kb
+  │    ├─ internal/triple
+  │    └─ internal/types
+  ├─ internal/projection/edn
+  │    ├─ internal/kb
+  │    ├─ internal/triple
+  │    └─ internal/ednformat
+  ├─ internal/graphops
+  │    └─ internal/triple
+  ├─ internal/triple          (no internal deps)
+  ├─ internal/backend         (no internal deps)
+  ├─ internal/config          (no internal deps)
+  ├─ internal/ui              (no internal deps)
+  ├─ internal/sevtypes        (no internal deps)
+  ├─ internal/ednformat       (no internal deps)
+  └─ internal/types
+       └─ internal/sevtypes
 ```
 
-## Layers
+## Layer model
 
-### `store` — Triple store
+### Layer 1: `triple` -- bare triple store
 
-Pure persistence. Everything is `(subject, predicate, object)` strings in SQLite. No domain knowledge.
+Pure persistence. Everything is `(subject, predicate, object)` strings in SQLite. No domain knowledge, no predicate semantics.
 
-- `InsertTriple` / `GetObject` / `GetSubjects` — basic CRUD
-- `Compose` / `ComposeInverse` — two-hop graph traversal (morphism composition)
-- `SearchContent` / `SearchTitles` — full-text search
-- `ConfigDir` / `OpenDB` / `LoadRoots` / `SaveRoots` — filesystem + DB bootstrapping
+Key types: `Triple`, `Store`.
 
-### `graph` — Filesystem ↔ triples sync
+Operations: `Assert`, `Retract`, `RetractBySubject`, `ByPredicateObject`, `Lookup` -- basic CRUD over triples. The store also provides `Search` for full-text queries.
 
-Reads `.md` files with YAML frontmatter, parses wikilinks, populates triples. Also provides graph queries.
+### Layer 2: `graphops` -- predicate metadata and path composition
 
-- **Sync path**: `FindRoot → LoadConfig → ScanFiles → ParseAllFiles → PopulateTriples`
-- **Query**: `BuildWalk` (focused node + local neighborhood), `BuildOverview` (full tree)
-- **Validation**: `Validate` checks orphans, missing parents, overflow
-- `ResolveGroup` — expands a named group definition into a list of node titles
+Knows about predicate properties (functional vs. relational, inverses, symmetry) and path composition, but nothing about sevens or PKM. Reusable outside this project.
 
-`BuildWalk` is the "camera" — given a title and depth, returns the node, its parent, children, siblings, and unwalked frontier. This is the primary input to function execution.
+Key types: `Graph`, `PredicateSpec`, `Multiplicity`.
 
-### `apply` — Function system
+Operations: `RegisterPredicate` declares predicate metadata. `Set` enforces functional multiplicity (retracts old value before asserting). `Compose` walks multi-hop paths via predicate chains. `Reachable` computes transitive closure. `Lookup` does single-predicate reads with functional/relational awareness.
 
-The domain model. Types, loading, rendering, and file-level execution.
+### Layer 3: `kb` -- PKM domain model
 
-**Core types:**
-- `Function` — EDN spec + `.md` prompt template(s). Has `Steps` (pipeline) or `Prompt` (single-step).
-- `Step` — one pipeline stage with input/output types, optional `Gate` (pause for review), optional `Requires`.
-- `Require` — declares what graph context a step needs: `"target"`, `"parent"`, `"children"`, `"siblings"`, `"history"`.
-- `ResolvedContext` — the fully-fetched graph neighborhood, ready for template substitution.
-- `FileOp` — LLM output: `{"action": "create"|"edit", ...}`.
-- `LogEntry` — append-only history of what functions did to a node.
+The layer that makes sevens *sevens*. Imposes the structure of organized thinking onto the graph: nodes in trees, bounded breadth, navigable relationships.
 
-**Loading**: `LoadFunction` reads `<name>.edn` + `<name>.md` / `<name>.<step>.md` from `~/.config/sevens/functions/`.
+Key types: `KB`, `Session`, `WalkResult` (via `sevtypes`), `OverviewNode` (via `sevtypes`).
 
-**Rendering**: Two paths depending on whether the function declares `Requires`:
-- `RenderStepPrompt` — simple variable substitution (`{{title}}`, `{{content}}`, `{{parent}}`, `{{children}}`, `{{prev}}`, `{{context}}`, `{{timestamp}}`)
-- `ResolveContext → RenderWithContext` — fetches graph neighbors per `Requires`, then substitutes all variables including `{{children-content}}`, `{{siblings}}`, `{{history}}`, `{{cross-walk-output}}`, `{{instruction}}`
+Responsibilities:
+- **Node CRUD** -- `CreateNode`, `DeleteNode`, `SetContent`, `MoveNode` with cycle detection.
+- **Cross-references** -- `LinkNodes`, `UnlinkNodes` for inter-node relationships.
+- **Walk** -- `Walk` gathers a focused node's neighborhood (parent, children, siblings, cross-refs, subtree) shaped by a `GatherSpec`. This is the primary input to function execution.
+- **Overview** -- `Overview` returns the full tree structure for a root.
+- **Sessions** -- `StartSession`, `EndSession` for working context tracking.
+- **Roots** -- `RegisterRoot`, `ClearRoot` for root lifecycle.
+- **Predicates** -- defines all sevens-specific predicate specs (`node/title`, `node/parent`, `node/content`, `block/heading`, `session/focus`, etc.) and registers them with the graphops layer.
 
-**Execution**: `ParseOps` (JSON → `[]FileOp`) → `ExecuteOps` (creates/edits `.md` files on disk).
+### Layer 4: `function` + `projection` + `types` -- transforms and surface formats
 
-**Git**: `CommitAll`, `RevertCommit`, `HasChanges`, `IsGitRepo`.
+Three packages that operate on top of the KB:
 
-**Log**: `AppendLogDB` / `ReadLogDB` — writes log events as triples (`log:<timestamp>:<node>` subject).
+**`function`** -- typed transformations on the knowledge base, composed as curried pipelines with gates and control flow.
 
-### `engine` — Pipeline orchestration
+Key types: `Function`, `Step`, `Executor`, `PipelineStore`, `Pipeline`, `TransformBackend`.
 
-The state machine that runs functions step by step.
+A `Function` is a named sequence of `Step`s. Each step declares what context to gather (`Require`, `PathSpec`), what output to produce (`Signature` with `OutputShape`), how to execute (`BackendSpec`: LLM, deterministic, or agent), and whether to pause for review (`GateSpec`). The `Executor` orchestrates execution: resolve context, render prompt, call backend, apply gate. `PipelineStore` persists pipeline state as triples.
 
-**Core type**: `EvalResult = Either[Suspension, StepResult]`
-- `Right(StepResult)` — step completed, pipeline can advance
-- `Left(Suspension)` — step hit a gate, paused for human review
+**`projection`** -- the contract between graph state and human-editable forms. The `Projection` interface lives in `internal/projection`; implementations live in sub-packages.
 
-**Flow:**
-```
-RunPipeline(cfg, startStep, prev)
-  for each step:
-    EvalStep / EvalComposedStep
-      → resolve context, render prompt, call backend
-      → parse output (ops or text)
-      → if step has gate: WriteSuspension → return Left(Suspension)
-      → else: feed output as `prev` to next step
-```
+- `projection/md` -- markdown files with YAML frontmatter. `Sync` parses `.md` files into triples. `ApplyOps` executes `FileOp`s (create/edit files). `Commit`/`Revert` wrap git.
+- `projection/edn` -- EDN config files (function definitions, type definitions, value models). Syncs `.edn` files into triples so the runtime reads everything from the graph.
 
-**Suspension lifecycle:**
-1. `WriteSuspension` — creates `suspension:*` triples in DB (target, function, step, raw-output, ops, status=pending)
-2. `FindSuspension` — finds most recent pending suspension for a node
-3. `ResolveSuspension` — marks status as accepted/rejected/revised
-4. `ReviseStep` — re-runs the step with feedback appended, creates new log entry
+**`types`** -- node-level type system. A type is a named predicate pattern; conformance is a query, not an assertion. Types drive projection mappings (frontmatter fields), context gathering policies, and schema instructions for LLM output.
 
-**Composed steps**: `EvalComposedStep` handles `:fn` (delegate to another function) and `:map-over` (run across multiple nodes).
+Key types: `TypeDef`, `PredicateSpec`, `StructureSpec`, `ProjectionSpec`, `GatherSpec`.
 
-### `backend` — LLM inference
+### Orchestration: `workflow`, `cmd/sevens`, `repl`
 
-Pluggable inference behind the `Backend` interface:
+**`workflow`** -- encodes concept synchronization rules as functions. Each workflow composes actions across KB, Function, and Projection in the correct order. Owns no state; coordinates and returns results for the caller to display.
 
-```go
-type Backend interface {
-    Name() string
-    Complete(ctx, InferenceRequest) (string, error)
-}
-```
+Key type: `Deps` -- bundles `KB`, `MarkdownProjection`, `PipelineStore`, and `TransformBackend`. Constructed once per CLI/REPL invocation.
 
-Three implementations:
-- `AnthropicBackend` — direct API calls via `anthropic-sdk-go`
-- `CodexBackend` — shells out to `codex exec`
-- `ClaudeBackend` — shells out to `claude`
+**`cmd/sevens`** -- CLI entry point. Cobra commands for sync, walk, apply, pipeline management, and REPL launch. `bridge.go` provides the `kbStack` helper that initializes the full `triple.Store` -> `graphops.Graph` -> `kb.KB` stack.
 
-`FromConfig` is the factory: reads `GlobalConfig.Backend` / `GlobalConfig.Backends` and returns the right implementation.
+**`repl`** -- interactive shell with focus state, mode switching, and inline navigation.
 
-`Capabilities` / `GenerateCodexConfig` / `GenerateClaudeConfig` handle MCP server wiring for backends that support tools.
+Modes:
+- `ModeNormal` -- command dispatch (dot commands, navigation, function invocation)
+- `ModeDiscussion` -- `[you]>` prompt, each line appended as user turn, auto-runs discuss function
+- `ModeNote` -- `[note]>` prompt, collects text, appends to node on `.end`
 
-### `repl` — Interactive shell
+## Supporting packages
 
-Wraps everything into a readline loop with focus state, mode switching, and inline navigation.
+**`backend`** -- LLM inference behind the `Backend` interface (`Complete(ctx, InferenceRequest) (string, error)`). Three implementations: `AnthropicBackend` (direct API), `CodexBackend` (shells out to `codex`), `ClaudeBackend` (shells out to `claude`). `FromConfig` factory reads config and returns the right implementation. Also handles MCP server capability wiring.
 
-**Modes:**
-- `ModeNormal` — standard command dispatch
-- `ModeDiscussion` — `[you]>` prompt, each line appended as user turn, auto-runs discuss function
-- `ModeNote` — `[note]>` prompt, collects text, appends to node on `.end`
+**`sevtypes`** -- types shared across concept boundaries. `FileOp` (flows from Function to Projection), `WalkNode`, `WalkResult`, `OverviewNode`, `GatherSpec`. These are the exchange vocabulary between concepts; no single concept owns them.
 
-**Main loop**: `Run → readline → dispatch`
+**`ednformat`** -- shared EDN struct types for parsing `.edn` config files. The canonical wire format for EDN-to-Go unmarshaling. Consumer packages (`function`, `projection/edn`) import these instead of defining their own copies.
 
-**Dispatch grammar** (checked in order):
-1. Dot commands (`.help`, `.model`, `.include`, `.quit`, etc.)
-2. Navigation (`..`, `up`, `root`)
-3. Focus by title (bare node title or `focus <title>`)
-4. Relative nav (`child 2`, `sibling 1`)
-5. Numeric select (bare number from last listing)
-6. Named commands (`walk`, `children`, `siblings`, `search`, `pending`, `log`, `accept`, `reject`, `revert`, `overview`, `note`, `discuss`, `new`)
-7. Function name (bare word matching a loaded function → `handleApply`)
+**`config`** -- loads global configuration from `~/.config/sevens/config.edn`. No graph, function, or LLM dependencies.
 
-### `ui` — Terminal rendering
+**`ui`** -- stateless terminal rendering. Glamour for markdown, lipgloss for styling. `SetTheme` toggles light/dark. All colors use ANSI indices for terminal palette adaptation.
 
-Stateless display helpers. Glamour for markdown, lipgloss for styling. `SetTheme` toggles light/dark.
+**`types`** -- see Layer 4 above.
 
-## Intended composition: the core flow
+## Core flows
+
+### Sync flow (files to triples)
 
 ```
-focus node
-  → graph.BuildWalk (local neighborhood)
-  → user invokes function
-  → apply.ResolveContext (gathers what function needs from graph)
-  → apply.RenderWithContext (substitutes template variables)
-  → engine.RunPipeline → backend.Complete (LLM call)
-  → LLM returns JSON → apply.ParseOps
-  → engine: gate → WriteSuspension → return Left(Suspension)
-  → user reviews → accept → apply.ExecuteOps → files change on disk
-  → graph.PopulateTriples (resync: files → triples)
+sevens sync <root>
+  -> projection/md.Sync(root)
+       -> ScanFiles(root)           -- find all .md files
+       -> parse each file           -- frontmatter + markdown -> triples
+       -> kb.ClearRoot(root)        -- retract stale triples
+       -> write triples             -- assert new state
+  -> projection/edn.Sync(configDir)
+       -> scan .edn files           -- function defs, type defs, value models
+       -> expand into triples       -- store in graph for runtime queries
 ```
 
-## Discussion mode flow
+### Walk flow (query to render)
+
+```
+user focuses a node (REPL or CLI)
+  -> kb.Walk(root, title, gatherSpec)
+       -> graphops.Compose           -- follow predicate paths
+       -> collect parent, children, siblings, cross-refs, subtree
+       -> return WalkResult
+  -> ui.Render(walkResult)           -- glamour markdown rendering
+```
+
+### Apply flow (function to backend to files)
+
+```
+user invokes function on focused node
+  -> function.Executor.Apply(fn, target, instruction)
+       -> ResolveContext              -- gather graph neighborhood per step's Requires/Paths
+       -> RenderPrompt               -- template substitution (target, children, siblings, etc.)
+       -> TransformBackend.Execute   -- LLM call (or deterministic handler, or agent)
+       -> parse output               -- JSON FileOps or display text
+       -> if gate: create pending pipeline, return for review
+       -> if no gate: return result directly
+  -> projection/md.ApplyOps          -- create/edit .md files on disk
+  -> projection/md.Sync              -- resync files to triples
+```
+
+### Pipeline lifecycle (apply to gate to accept/reject/revise)
+
+```
+function with gate produces output
+  -> PipelineStore.Create            -- persist pipeline state as triples
+  -> pipeline enters PhasePending
+  -> user reviews output
+
+  accept:
+    -> PipelineStore.Advance         -- phase -> PhaseAccepted
+    -> projection/md.ApplyOps        -- write files
+    -> projection/md.Commit          -- git commit
+    -> advance to next step or PhaseCompleted
+
+  reject:
+    -> PipelineStore.Advance         -- phase -> PhaseRejected
+    -> projection/md.Revert          -- undo changes if RollbackOnReject
+
+  revise:
+    -> re-execute step with feedback appended
+    -> new result replaces pending output
+    -> back to PhasePending for re-review
+```
+
+### Discussion flow
 
 ```
 user types "discuss"
-  → enterDiscussion
-  → runPipeline (discuss function creates/continues Discussion child)
-  → auto-accept ops (no review gate — discussion is conversational)
-  → show agent turns
-  → enter [you]> mode
-  → user types text → append to discussion file → resync → runPipeline → auto-accept → show turns
-  → .end → commit → exit to normal mode
+  -> workflow starts discuss function (creates/continues Discussion child node)
+  -> auto-accept ops (no review gate -- discussion is conversational)
+  -> show agent turns, enter ModeDiscussion
+  -> user types text -> append to discussion file -> resync -> run discuss -> show turns
+  -> .end -> commit -> exit to ModeNormal
 ```
 
-## Known bugs (as of 2026-04-08)
+## Design references
 
-1. **`runPipeline` auto-enters `handleAccept`** — but `enterDiscussion` / `handleDiscussionInput` call `runPipeline` then `doAccept` separately. Discussion mode should bypass the y/n/r loop entirely.
+The concept design specs that motivated this architecture:
 
-2. **Discussion mode swallows commands** — `handleDiscussionInput` only checks `.end`/`.cancel`/`.info`/`.model`. Everything else (`.fns`, `pending`, `discuss`, bare dot commands) gets appended as user text to the discussion file.
-
-3. **Revision creates no new suspension** — after `ReviseStep`, the old suspension is resolved but a new one is only written for ops-type output. The `[y/n/r]>` loop then calls `FindSuspension` and finds nothing. (Partially addressed by adding `WriteSuspension` in the revision path.)
-
-4. **Colons in node titles** — `discuss` creates children titled `"Discussion: <title>"`. Colons break Obsidian wikilinks (`:` is the alias separator). These titles need a different separator.
+- `docs/design/concept-graph.md` -- Layer 1: bare triple store purpose and boundaries
+- `docs/design/concept-graph-ops.md` -- Layer 2: predicate metadata, path composition
+- `docs/design/concept-knowledge-base.md` -- Layer 3: PKM domain model
+- `docs/design/concept-function.md` -- Layer 4: typed transformations and pipelines
+- `docs/design/concept-projection.md` -- Contract: presentational surface
+- `docs/design/concept-types.md` -- Named predicate patterns
+- `docs/design/concept-config.md` -- Global and per-root configuration

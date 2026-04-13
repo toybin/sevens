@@ -302,7 +302,7 @@ Functions produce one of four primitive output types:
 
 ### Function signatures
 
-`sevens list functions` shows each function's type signature:
+`sevens functions` shows each function's type signature:
 
 ```
 notice :: Parent -> Text          Surface patterns, gaps, tensions...
@@ -1371,7 +1371,7 @@ becomes `node/*` and `meta/*` predicates. Headings and list items become
 `block/*` predicates. Writing back renders triples into Markdown with
 frontmatter.
 
-**EDN projection** (direction): `.edn` config files for types, functions,
+**EDN projection** (future direction): `.edn` config files for types, functions,
 and value models are designed to sync into the triple store and be queryable
 at runtime. Currently, these are loaded from files directly; the projection
 into triples is the planned next step.
