@@ -360,7 +360,14 @@ func displayWorkflowApplyResult(r *workflow.ApplyResult) {
 			ui.Success.Render("[apply]"),
 			ui.Label.Render(r.FunctionName),
 			ui.NodeTitle.Render(r.Target))
-	case r.Output != "":
+	case len(r.Suggestions) > 0:
+		// Suggestions-shape function completed without a gate
+		// (rare — most are gated). Display them formatted rather
+		// than falling through to the raw JSON in r.Output.
+		if formatted := formatSuggestions(r.Suggestions); formatted != "" {
+			fmt.Print(formatted)
+		}
+	case r.IsText && r.Output != "":
 		fmt.Println(ui.RenderMarkdownOrPlain(r.Output))
 	default:
 		// Completed with no ops and no text — the function ran
