@@ -61,17 +61,18 @@ type Param struct {
 
 // Step is the EDN representation of a pipeline step.
 type Step struct {
-	Name        string       `edn:"name"`
-	Prompt      string       `edn:"prompt"`
-	Input       string       `edn:"input"`
-	Output      string       `edn:"output"`
-	OutputType  string       `edn:"output-type"`
-	Gate        string       `edn:"gate"`
-	Requires    []Require    `edn:"requires,omitempty"`
-	Fn          string       `edn:"fn,omitempty"`
-	MapOver     string       `edn:"map-over,omitempty"`
-	Agent       *AgentConfig `edn:"agent,omitempty"`
-	BackendSpec *BackendSpec `edn:"backend,omitempty"`
+	Name         string       `edn:"name"`
+	Prompt       string       `edn:"prompt"`
+	Input        string       `edn:"input"`
+	Output       string       `edn:"output"`
+	OutputType   string       `edn:"output-type"`
+	OutputPicker any          `edn:"output-picker,omitempty"`
+	Gate         string       `edn:"gate"`
+	Requires     []Require    `edn:"requires,omitempty"`
+	Fn           string       `edn:"fn,omitempty"`
+	MapOver      string       `edn:"map-over,omitempty"`
+	Agent        *AgentConfig `edn:"agent,omitempty"`
+	BackendSpec  *BackendSpec `edn:"backend,omitempty"`
 }
 
 // Function is the EDN representation of a function definition.
@@ -81,6 +82,7 @@ type Function struct {
 	Prompt       string       `edn:"prompt"`
 	Input        string       `edn:"input"`
 	Output       string       `edn:"output"`
+	OutputPicker any          `edn:"output-picker,omitempty"`
 	Steps        []Step       `edn:"steps"`
 	Requires     []Require    `edn:"requires,omitempty"`
 	Context      []PathSpec   `edn:"context,omitempty"`
@@ -97,7 +99,13 @@ func (f *Function) EffectiveSteps() []Step {
 	if len(f.Steps) > 0 {
 		return f.Steps
 	}
-	return []Step{{Name: "default", Prompt: f.Prompt, Input: f.Input, Output: f.Output}}
+	return []Step{{
+		Name:         "default",
+		Prompt:       f.Prompt,
+		Input:        f.Input,
+		Output:       f.Output,
+		OutputPicker: f.OutputPicker,
+	}}
 }
 
 // ValidateComposition checks step output/input chaining.

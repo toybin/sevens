@@ -7,6 +7,7 @@ import (
 
 	"sevens/internal/kb"
 	"sevens/internal/types"
+	"sevens/internal/types/kernel"
 )
 
 // Executor orchestrates pipeline execution using the state machine,
@@ -357,6 +358,27 @@ func (e *Executor) executeStep(ctx context.Context, root string, fn *Function, p
 		return nil, fmt.Errorf("resolving context for step %q: %w", step.Name, err)
 	}
 
+	// Phase 1: if this step declares an OutputPicker, evaluate it
+	// BEFORE the LLM to resolve the effective output type. The
+	// picker's decision drives both the schema instruction injected
+	// into the system prompt and the type the response is validated
+	// against — so the LLM is told exactly one shape to produce.
+	//
+	// A picker is pure data loaded from the function's EDN config,
+	// not a Go-side hook. Every function that needs conditional
+	// output declares its picker the same way; the executor has no
+	// knowledge of which function is running.
+	var routedType kernel.TypeName
+	if step.OutputPicker != nil {
+		resolved, rerr := resolveStepPicker(ctx, e.KB, root, p.Target, prevOutput, step, p)
+		if rerr != nil {
+			return nil, fmt.Errorf(
+				"resolving output picker for step %q in function %q: %w",
+				step.Name, fn.Name, rerr)
+		}
+		routedType = resolved
+	}
+
 	// Select backend based on step configuration
 	var be TransformBackend
 	var prompt RenderedPrompt
@@ -374,8 +396,23 @@ func (e *Executor) executeStep(ctx context.Context, root string, fn *Function, p
 		be = e.Backend
 		promptText := RenderPrompt(step.Backend.PromptTemplate, rc)
 		// Inject output schema instruction into system prompt.
+		// If the picker resolved a specific primitive, look up THAT
+		// primitive's legacy schema so the LLM is told exactly which
+		// JSON shape to produce. Otherwise fall back to the step's
+		// declared type (the static path).
 		systemPrompt := step.Backend.SystemPrompt
-		if schema := e.resolveSchemaInstruction(step, allTypes); schema != "" {
+		var schema string
+		if routedType != "" {
+			if allTypes != nil {
+				if td, ok := allTypes[string(routedType)]; ok {
+					schema = types.ComposeSchemaInstruction(td, allTypes)
+				}
+			}
+		}
+		if schema == "" {
+			schema = e.resolveSchemaInstruction(step, allTypes)
+		}
+		if schema != "" {
 			if systemPrompt != "" {
 				systemPrompt += "\n\n"
 			}
@@ -406,7 +443,17 @@ func (e *Executor) executeStep(ctx context.Context, root string, fn *Function, p
 			// downstream. This rejects malformed edits (empty file,
 			// missing old_text, etc.) loudly at the parse boundary
 			// instead of silently slug-falling-back to untitled.md.
-			if verr := ValidateOps(env.Ops); verr != nil {
+			//
+			// If a router resolved a specific output type, enforce
+			// that every op matches that type — a discuss call that
+			// was routed to "edit" must not emit create ops.
+			var verr error
+			if routedType != "" {
+				verr = ValidateOpsAgainst(env.Ops, routedType)
+			} else {
+				verr = ValidateOps(env.Ops)
+			}
+			if verr != nil {
 				return nil, fmt.Errorf(
 					"step %q: LLM produced invalid %s output: %w",
 					step.Name, shapeLabel(step.Output.Shape), verr)

@@ -181,7 +181,13 @@ func effectiveEDNSteps(raw *ednFunction) []ednStep {
 	if len(raw.Steps) > 0 {
 		return raw.Steps
 	}
-	return []ednStep{{Name: "default", Prompt: raw.Prompt, Input: raw.Input, Output: raw.Output}}
+	return []ednStep{{
+		Name:         "default",
+		Prompt:       raw.Prompt,
+		Input:        raw.Input,
+		Output:       raw.Output,
+		OutputPicker: raw.OutputPicker,
+	}}
 }
 
 func convertEDNStep(s ednStep, fn *ednFunction) Step {
@@ -219,6 +225,35 @@ func convertEDNStep(s ednStep, fn *ednFunction) Step {
 
 	step.Output = ParseOutputSignature(s.Output, s.OutputType)
 	step.Input = ParseInputSignature(s.Input)
+
+	// Parse :output-picker if present. An error here is fatal: a
+	// malformed picker declaration should fail at load time, not
+	// silently fall through to the static output.
+	if s.OutputPicker != nil {
+		op, err := ParseOutputPicker(s.OutputPicker)
+		if err != nil {
+			fmt.Fprintf(os.Stderr,
+				"warning: step %q: output-picker parse failed: %v\n",
+				s.Name, err)
+		} else {
+			step.OutputPicker = op
+			// If the step did not declare a static :output, derive
+			// the output shape from the picker's alternatives. All
+			// alternatives must share a primitive shape family
+			// (create/edit → ShapeFileOps; text → ShapeText;
+			// suggestion → ShapeStructured). Mixed families are a
+			// load-time error.
+			if s.Output == "" {
+				shape, derr := DeriveShapeFromPicker(op)
+				if derr != nil {
+					fmt.Fprintf(os.Stderr,
+						"warning: step %q: %v\n", s.Name, derr)
+				} else {
+					step.Output.Shape = shape
+				}
+			}
+		}
+	}
 
 	if s.Gate == "approve" {
 		step.Gate = &GateSpec{

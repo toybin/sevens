@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 
+	ednencode "olympos.io/encoding/edn"
+
 	"sevens/internal/function"
 	"sevens/internal/kb"
 	"sevens/internal/types"
@@ -85,6 +87,26 @@ func (p *EDNProjection) LoadFunction(ctx context.Context, name string) (*functio
 		output, _ := p.lookupOne(ctx, subj, kb.PredFnOutput)
 		step.Output = parseOutputSignature(output, "")
 		step.Input = function.Signature{Shape: function.ShapeText}
+
+		// Output picker: if present in the graph, re-parse the
+		// serialized EDN form back into a picker.OutputPicker and
+		// attach it to the step. This is the equivalent of the
+		// file-based loader's ParseOutputPicker call.
+		if pickerEDN, _ := p.lookupOne(ctx, subj, kb.PredFnOutputPicker); pickerEDN != "" {
+			var raw any
+			if err := ednencode.Unmarshal([]byte(pickerEDN), &raw); err == nil {
+				if op, perr := function.ParseOutputPicker(raw); perr == nil && op != nil {
+					step.OutputPicker = op
+					// Derive shape from alternatives if step's static
+					// :output was empty.
+					if output == "" {
+						if shape, derr := function.DeriveShapeFromPicker(op); derr == nil {
+							step.Output.Shape = shape
+						}
+					}
+				}
+			}
+		}
 
 		prompt, _ := p.lookupOne(ctx, subj, kb.PredFnPrompt)
 		persona, _ := p.lookupOne(ctx, subj, kb.PredFnPersona)

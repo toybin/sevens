@@ -3,7 +3,10 @@
 // gates and control flow.
 package function
 
-import "sevens/internal/sevtypes"
+import (
+	"sevens/internal/function/picker"
+	"sevens/internal/sevtypes"
+)
 
 // --- Output shape ---
 
@@ -123,11 +126,21 @@ type FileOp = sevtypes.FileOp
 
 // Step is one stage in a function's pipeline.
 type Step struct {
-	Name       string
-	Requires   []Require
-	Paths      []PathSpec
-	Input      Signature
-	Output     Signature
+	Name     string
+	Requires []Require
+	Paths    []PathSpec
+	Input    Signature
+	Output   Signature
+
+	// OutputPicker, when non-nil, overrides Output at dispatch
+	// time. The executor evaluates the picker before calling the
+	// LLM and uses the resolved kernel type name to drive both
+	// schema-instruction injection and parse-time validation.
+	//
+	// Loaded from EDN `:output-picker` via parsePickerSpec. See
+	// internal/function/picker for the expression language.
+	OutputPicker picker.OutputPicker
+
 	Gate       *GateSpec    // nil = no gate
 	Flow       *ControlFlow // nil = sequence
 	Backend    BackendSpec

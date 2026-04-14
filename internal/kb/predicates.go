@@ -64,6 +64,10 @@ const (
 	PredFnPipelineOrder = "fn/pipeline-order"
 	PredFnBackend       = "fn/backend"
 	PredFnParams        = "fn/params"
+	// PredFnOutputPicker stores the serialized EDN form of a
+	// function's :output-picker declaration as a single string. On
+	// load the consumer re-parses it via function.ParseOutputPicker.
+	PredFnOutputPicker = "fn/output-picker"
 )
 
 // Step predicates
@@ -160,6 +164,7 @@ func allSpecs() []graphops.PredicateSpec {
 		{Name: PredFnPipelineOrder, Multiplicity: graphops.Functional},
 		{Name: PredFnBackend, Multiplicity: graphops.Functional},
 		{Name: PredFnParams, Multiplicity: graphops.Functional},
+		{Name: PredFnOutputPicker, Multiplicity: graphops.Functional},
 
 		// Step predicates
 		{Name: PredStepName, Multiplicity: graphops.Functional},

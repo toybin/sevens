@@ -33,6 +33,36 @@ func ValidateOps(ops []FileOp) error {
 	return nil
 }
 
+// ValidateOpsAgainst is the routed validator used when a function
+// has a FunctionRouter registered. The router returns a single
+// expected primitive type (e.g. "create" or "edit"), and every op
+// produced by the LLM must match that type. A mixed output — e.g.
+// an edit op when the router said "create" — is rejected as a
+// contract violation.
+//
+// The router's decision was already told to the LLM via the schema
+// instruction in the system prompt, so a mismatch indicates the LLM
+// ignored the instruction. Failing loudly here is the correct
+// behavior — the executor will propagate the error and the caller
+// can retry, revise, or accept the failure.
+func ValidateOpsAgainst(ops []FileOp, expected kernel.TypeName) error {
+	for i, op := range ops {
+		// Each op is first checked against its own action's
+		// primitive (shape sanity) and then against the router's
+		// declared expectation (contract sanity).
+		if err := validateOp(op); err != nil {
+			return fmt.Errorf("op[%d] (%s): %w", i, opLabel(op), err)
+		}
+		actual := kernel.TypeName(op.Action)
+		if actual != expected {
+			return fmt.Errorf(
+				"op[%d]: router selected %q but LLM produced a %q op",
+				i, expected, op.Action)
+		}
+	}
+	return nil
+}
+
 func opLabel(op FileOp) string {
 	if op.Action == "" {
 		return "unknown-action"
