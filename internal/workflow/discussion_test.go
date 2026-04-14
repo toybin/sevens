@@ -107,6 +107,84 @@ func TestContinueDiscussion_AppendsUserTurn(t *testing.T) {
 	_ = agentReply
 }
 
+// TestStartDiscussion_PickerRoutesToEditOnExistingFile verifies that
+// when a Discussion - <target> node already exists in the KB, the
+// polymorphic discuss function routes to the `edit` primitive at
+// dispatch time — not `create`. This is the specific behavior the
+// EDN-declared picker expression in defaults/functions/discuss.edn
+// is supposed to guarantee.
+func TestStartDiscussion_PickerRoutesToEditOnExistingFile(t *testing.T) {
+	e := setup(t)
+	e.seedTree()
+
+	// Pre-seed a discussion file so the picker's exists-node? check
+	// is true for "Discussion - The Commons". This is the state a
+	// user would be in on the second CLI invocation of discuss.
+	e.writeFile("discussion-the-commons.md", `---
+title: Discussion - The Commons
+parent: "[[The Commons]]"
+---
+
+# Discussion
+
+**[agent 2026-04-12 10:00]** What is the core tension in governance?`)
+	e.sync()
+
+	// The picker should resolve to `edit`, so the executor will tell
+	// the LLM to produce an edit op. If the picker misfired and
+	// resolved to `create`, a create op would be attempted and
+	// ValidateOpsAgainst would reject it as a shape mismatch.
+	editOp := `[{"action": "edit", "file": "Discussion - The Commons", "old_text": "What is the core tension in governance?", "new_text": "What is the core tension in governance?\n\n**[agent 2026-04-12 10:05]** Follow-up question."}]`
+	e.withMock(editOp)
+
+	state, _, err := workflow.StartDiscussion(ctx(), e.deps, e.root, "The Commons")
+	if err != nil {
+		t.Fatalf("StartDiscussion error: %v", err)
+	}
+
+	// Picker should have resolved to edit, and the edit should have
+	// been materialized. FileCreated should be FALSE because the
+	// file existed before we started.
+	if state.FileCreated {
+		t.Error("expected FileCreated=false for pre-existing discussion")
+	}
+
+	// The file should contain the appended agent turn.
+	data, err := os.ReadFile(state.FilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "Follow-up question") {
+		t.Errorf("expected follow-up turn to be appended, got:\n%s", string(data))
+	}
+}
+
+// TestStartDiscussion_PickerRejectsShapeMismatch verifies that the
+// picker's enforcement contract holds at runtime: if the LLM returns
+// ops whose action doesn't match the picker's resolved type, the
+// executor fails loudly instead of silently materializing the wrong
+// shape. This is the kernel-backed ValidateOpsAgainst check.
+func TestStartDiscussion_PickerRejectsShapeMismatch(t *testing.T) {
+	e := setup(t)
+	e.seedTree()
+
+	// No existing discussion file, so picker should resolve to `create`.
+	// The mock below deliberately returns an EDIT op instead — the
+	// shape the LLM should NOT have produced. The kernel validator
+	// must catch this and refuse to advance.
+	wrongShape := `[{"action": "edit", "file": "Discussion - The Commons", "old_text": "x", "new_text": "y"}]`
+	e.withMock(wrongShape)
+
+	_, _, err := workflow.StartDiscussion(ctx(), e.deps, e.root, "The Commons")
+	if err == nil {
+		t.Fatal("expected picker shape enforcement to reject the edit op")
+	}
+	// Error should identify the mismatch specifically.
+	if !strings.Contains(err.Error(), "router selected") && !strings.Contains(err.Error(), "create") {
+		t.Errorf("expected error naming picker selection, got: %v", err)
+	}
+}
+
 func TestContinueDiscussion_ErrorsWithoutFilePath(t *testing.T) {
 	e := setup(t)
 	e.seedTree()
