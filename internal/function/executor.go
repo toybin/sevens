@@ -3,6 +3,7 @@ package function
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"sevens/internal/kb"
@@ -122,17 +123,23 @@ func (e *Executor) Revise(ctx context.Context, root string, fn *Function, pipeli
 		return nil, fmt.Errorf("resolving context for revise: %w", err)
 	}
 
-	promptText := RenderPrompt(step.Backend.PromptTemplate, rc)
-	// Append revision history and feedback
+	// Base prompt plus revision history and feedback, accumulated
+	// with a strings.Builder so the history loop avoids quadratic
+	// string concatenation.
+	var promptBuilder strings.Builder
+	promptBuilder.WriteString(RenderPrompt(step.Backend.PromptTemplate, rc))
 	history := p.RevisionHistory(step.Gate.HistoryPolicy)
 	if len(history) > 0 {
-		promptText += "\n\n<revision-history>\n"
+		promptBuilder.WriteString("\n\n<revision-history>\n")
 		for _, entry := range history {
-			promptText += fmt.Sprintf("Previous attempt: %s\nFeedback: %s\n\n", entry.Attempt.Raw, entry.Feedback)
+			fmt.Fprintf(&promptBuilder,
+				"Previous attempt: %s\nFeedback: %s\n\n",
+				entry.Attempt.Raw, entry.Feedback)
 		}
-		promptText += "</revision-history>\n"
+		promptBuilder.WriteString("</revision-history>\n")
 	}
-	promptText += fmt.Sprintf("\n<feedback>%s</feedback>\n", feedback)
+	fmt.Fprintf(&promptBuilder, "\n<feedback>%s</feedback>\n", feedback)
+	promptText := promptBuilder.String()
 
 	prompt := RenderedPrompt{
 		System: step.Backend.SystemPrompt,
@@ -448,6 +455,16 @@ func (e *Executor) executeStep(ctx context.Context, root string, fn *Function, p
 	result, err := be.Execute(ctx, prompt)
 	if err != nil {
 		return nil, fmt.Errorf("backend execution for step %q: %w", step.Name, err)
+	}
+
+	// Record the resolved type on the result so downstream pickers
+	// and static analyses can see what the executor committed to.
+	// Falls back to the primitive derived from the declared shape
+	// when no picker fired.
+	if routedType != "" {
+		result.ResolvedType = routedType
+	} else {
+		result.ResolvedType = kernel.TypeName(PrimitiveTypeName(step.Output.Shape))
 	}
 
 	// Parse output using universal JSON parser.

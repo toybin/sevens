@@ -111,29 +111,18 @@ func shapeForPrimitiveName(name string) (OutputShape, error) {
 }
 
 // priorOutputTypes returns a slice of kernel TypeNames for the
-// outputs of all previously-completed steps in the pipeline.
-// Indexed in order so a picker expression can reference step i's
-// output type via PriorOutputType{Index: i}.
+// outputs of all previously-completed steps in the pipeline, in
+// index order. Each prior step's resolved type is read directly
+// from TransformResult.ResolvedType, which the executor populates
+// in executeStep. A picker in step i+1 can reach back via
+// PriorOutputType{Index: i} to see exactly what step i produced.
 func priorOutputTypes(p *Pipeline) []kernel.TypeName {
 	if p == nil || len(p.PriorStepResults) == 0 {
 		return nil
 	}
-	// The function package has no tracking of resolved output types
-	// per prior step — it stores raw results. For now, return a
-	// best-effort list based on what's in the Signature. Callers
-	// that need tighter typing should wait for the full
-	// function-contract-layer port.
 	out := make([]kernel.TypeName, 0, len(p.PriorStepResults))
 	for _, r := range p.PriorStepResults {
-		if r.IsText {
-			out = append(out, "text")
-		} else if len(r.Ops) > 0 {
-			// Use the first op's action as a proxy for the shape.
-			first := r.Ops[0].Action
-			out = append(out, kernel.TypeName(first))
-		} else {
-			out = append(out, "")
-		}
+		out = append(out, r.ResolvedType)
 	}
 	return out
 }

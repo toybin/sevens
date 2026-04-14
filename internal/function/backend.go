@@ -1,6 +1,10 @@
 package function
 
-import "context"
+import (
+	"context"
+
+	"sevens/internal/types/kernel"
+)
 
 // TransformBackend is the abstraction over execution mechanisms.
 // Defined here (where it's used), not in the backend implementations.
@@ -22,6 +26,14 @@ type TransformResult struct {
 	Ops         []FileOp
 	Suggestions []Suggestion
 	IsText      bool // true if display-only
+
+	// ResolvedType is the kernel TypeName the executor committed
+	// to for this step: either a picker's resolution, or the
+	// primitive derived from the step's declared shape. Populated
+	// by the executor in executeStep. Used by downstream pickers
+	// (via StepContext.PriorOutputType) so multi-step pipelines
+	// can dispatch on earlier steps' resolved types.
+	ResolvedType kernel.TypeName
 }
 
 // RevisionEntry is one (attempt, feedback) pair.
