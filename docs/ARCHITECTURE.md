@@ -18,10 +18,12 @@ cmd/sevens
   │    ├─ internal/config
   │    └─ internal/ui
   ├─ internal/function
+  │    ├─ internal/function/picker      (picker expression AST + evaluator)
   │    ├─ internal/kb
   │    ├─ internal/graphops
   │    ├─ internal/triple
   │    ├─ internal/types
+  │    ├─ internal/types/kernel         (runtime type kernel, validator, schema)
   │    ├─ internal/sevtypes
   │    └─ internal/ednformat
   ├─ internal/kb
@@ -81,22 +83,26 @@ Responsibilities:
 - **Roots** -- `RegisterRoot`, `ClearRoot` for root lifecycle.
 - **Predicates** -- defines all sevens-specific predicate specs (`node/title`, `node/parent`, `node/content`, `block/heading`, `session/focus`, etc.) and registers them with the graphops layer.
 
-### Layer 4: `function` + `projection` + `types` -- transforms and surface formats
+### Layer 4: `function` + `projection` + `types` + `types/kernel` + `function/picker` -- transforms and surface formats
 
-Three packages that operate on top of the KB:
+Five packages that operate on top of the KB:
 
 **`function`** -- typed transformations on the knowledge base, composed as curried pipelines with gates and control flow.
 
 Key types: `Function`, `Step`, `Executor`, `PipelineStore`, `Pipeline`, `TransformBackend`.
 
-A `Function` is a named sequence of `Step`s. Each step declares what context to gather (`Require`, `PathSpec`), what output to produce (`Signature` with `OutputShape`), how to execute (`BackendSpec`: LLM, deterministic, or agent), and whether to pause for review (`GateSpec`). The `Executor` orchestrates execution: resolve context, render prompt, call backend, apply gate. `PipelineStore` persists pipeline state as triples.
+A `Function` is a named sequence of `Step`s. Each step declares what context to gather (`Require`, `PathSpec`), what output to produce (`Signature` with `OutputShape`, and optionally a `picker.OutputPicker` for dependent dispatch), how to execute (`BackendSpec`: LLM, deterministic, or agent), and whether to pause for review (`GateSpec`). The `Executor` orchestrates execution: evaluate the picker if present, resolve context, compose the kernel schema instruction, render prompt, call backend, validate the response through the kernel, apply gate. `PipelineStore` persists pipeline state as triples.
+
+**`function/picker`** -- picker expression AST and evaluator for functions with dependent output types. Small closed-vocabulary expression language (twelve constructors: `LitType`, `LitStr`, `If`, `And`, `Or`, `Not`, `Eq`, `Concat`, `TargetTitle`, `ExistsNode`, `HasType`, `PriorOutputType`). A function's EDN declares `:output-picker {:alternatives [...] :expr (...)}`; the executor evaluates the expression before the LLM call and uses the resolved type to drive both schema-instruction injection and parse-time validation. `docs/picker-language.md` is the reference. Currently used by `discuss` to route between `create` and `edit` primitives based on whether a `Discussion - <target>` child exists in the KB.
+
+**`types/kernel`** -- runtime type kernel. The authoritative source for primitive type definitions, schema composition, and output validation. Loads the four primitives (`text`, `create`, `edit`, `suggestion`) from structured EDN files under `internal/types/kernel/primitives/` (embedded via `//go:embed`). Each primitive declares an `:envelope` (scalar or array), `:item-fields` / `:scalar-field`, `:item-constants` (routing tags like `action=create`), and a hand-written `:example` that gets `json.Marshal`'d at load time so the example shown to the LLM is canonical by construction. The same structured data drives `SchemaInstruction` (prompt rendering) and `LocalFields` (validator). `Validate(kb, typeName, value)` walks the composed shape and any refinements (`Intrinsic` or `Contextual`). `IsSubtype`, `Ancestors`, `RootPrimitive`, `ChildTypeOf`, `ComposedShape`, `CollectRefinements` — all cycle-guarded — provide the subsumption and chain-walk machinery. See `docs/sketch/TypesKernel.hs` for the design spec and `docs/design/SESSION-HANDOFF-2026-04-14.md` for current state.
 
 **`projection`** -- the contract between graph state and human-editable forms. The `Projection` interface lives in `internal/projection`; implementations live in sub-packages.
 
 - `projection/md` -- markdown files with YAML frontmatter. `Sync` parses `.md` files into triples. `ApplyOps` executes `FileOp`s (create/edit files). `Commit`/`Revert` wrap git.
 - `projection/edn` -- EDN config files (function definitions, type definitions, value models). Syncs `.edn` files into triples so the runtime reads everything from the graph.
 
-**`types`** -- node-level type system. A type is a named predicate pattern; conformance is a query, not an assertion. Types drive projection mappings (frontmatter fields), context gathering policies, and schema instructions for LLM output.
+**`types`** -- legacy node-level type system. Was the original home for type definitions, conformance queries, projection mappings, and schema instructions. Now mostly superseded by `types/kernel`. Still loaded at runtime and still consulted as a fallback by the executor and preview paths for `:output-type` declarations on functions — but no default function uses `:output-type`, so this path is effectively dead on the current function set. Retained until the context-type unification lands (see `docs/design/SESSION-HANDOFF-2026-04-14.md`).
 
 Key types: `TypeDef`, `PredicateSpec`, `StructureSpec`, `ProjectionSpec`, `GatherSpec`.
 
