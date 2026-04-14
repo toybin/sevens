@@ -195,9 +195,25 @@ func validateEditOp(root string, op projection.FileOp, k *kb.KB) error {
 		return fmt.Errorf("md: read %q: %w", filePath, err)
 	}
 	if !strings.Contains(string(data), op.OldText) {
-		return fmt.Errorf("md: exact match not found in %q", filePath)
+		return fmt.Errorf("md: exact match not found in %q\n  expected: %s",
+			filePath, formatOldText(op.OldText))
 	}
 	return nil
+}
+
+// formatOldText truncates a long old_text for error messages. Shows
+// the first and last 60 characters with an ellipsis in between, so
+// the user can see what the LLM thought the anchor was without
+// dumping an entire block to the terminal.
+func formatOldText(s string) string {
+	const maxChars = 140
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	if len(s) <= maxChars {
+		return fmt.Sprintf("%q", s)
+	}
+	head := s[:60]
+	tail := s[len(s)-60:]
+	return fmt.Sprintf("%q ... %q", head, tail)
 }
 
 func editFile(root string, op projection.FileOp, k *kb.KB) (string, error) {
@@ -219,7 +235,8 @@ func editFile(root string, op projection.FileOp, k *kb.KB) (string, error) {
 
 	content := string(data)
 	if !strings.Contains(content, op.OldText) {
-		return "", fmt.Errorf("md: exact match not found in %q", filePath)
+		return "", fmt.Errorf("md: exact match not found in %q\n  expected: %s",
+			filePath, formatOldText(op.OldText))
 	}
 
 	content = strings.Replace(content, op.OldText, op.NewText, 1)
