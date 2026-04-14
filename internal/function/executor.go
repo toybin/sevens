@@ -353,6 +353,43 @@ func (e *Executor) runFromCurrent(ctx context.Context, root string, fn *Function
 // executeStep runs a single step: resolve context, render prompt, call backend, complete.
 // allTypes is a pre-loaded map of type definitions (may be nil).
 func (e *Executor) executeStep(ctx context.Context, root string, fn *Function, p *Pipeline, step Step, allTypes map[string]*types.TypeDef) (*ApplyResult, error) {
+	// If the step delegates to another function via :fn, load the
+	// delegated function and substitute its first step's backend
+	// config, path specs, requires, and output signature. This is
+	// how audit's "observe" step reuses notice's prompt and
+	// context — without it, the step runs with an empty prompt.
+	//
+	// Name, Gate, and Flow stay on the outer step (the delegator
+	// owns the pipeline-state semantics). OutputPicker also stays
+	// on the delegator so composition doesn't accidentally swap
+	// in a picker from the delegated function.
+	if step.ComposedOf != "" {
+		delegated, _, derr := LoadFunction(step.ComposedOf)
+		if derr != nil {
+			return nil, fmt.Errorf(
+				"step %q: loading delegated function %q: %w",
+				step.Name, step.ComposedOf, derr)
+		}
+		delegatedSteps := delegated.EffectiveSteps()
+		if len(delegatedSteps) == 0 {
+			return nil, fmt.Errorf(
+				"step %q: delegated function %q has no steps",
+				step.Name, step.ComposedOf)
+		}
+		d := delegatedSteps[0]
+		step.Backend = d.Backend
+		step.Paths = d.Paths
+		step.Requires = d.Requires
+		// Inherit the delegated function's output signature
+		// unless the outer step declared its own.
+		if step.Output.Shape == ShapeText && step.Output.TypeName == "" {
+			step.Output = d.Output
+		}
+		if step.OutputPicker == nil {
+			step.OutputPicker = d.OutputPicker
+		}
+	}
+
 	// Gather previous step output
 	prevOutput := ""
 	if len(p.PriorStepResults) > 0 {
