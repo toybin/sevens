@@ -354,13 +354,22 @@ func displayWorkflowApplyResult(r *workflow.ApplyResult) {
 	}
 
 	// Completed
-	if len(r.FilesCreated) > 0 || len(r.FilesEdited) > 0 {
+	switch {
+	case len(r.FilesCreated) > 0 || len(r.FilesEdited) > 0:
 		fmt.Fprintf(os.Stderr, "%s Applied %s to %s\n",
 			ui.Success.Render("[apply]"),
 			ui.Label.Render(r.FunctionName),
 			ui.NodeTitle.Render(r.Target))
-	} else if r.Output != "" {
+	case r.Output != "":
 		fmt.Println(ui.RenderMarkdownOrPlain(r.Output))
+	default:
+		// Completed with no ops and no text — the function ran
+		// cleanly but had nothing to apply. Say so explicitly
+		// rather than leaving the user with a blank screen.
+		fmt.Fprintf(os.Stderr, "%s %s reported no changes for %s\n",
+			ui.Dim.Render("[apply]"),
+			ui.Label.Render(r.FunctionName),
+			ui.NodeTitle.Render(r.Target))
 	}
 }
 

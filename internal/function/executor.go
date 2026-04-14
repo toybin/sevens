@@ -507,6 +507,15 @@ func (e *Executor) executeStep(ctx context.Context, root string, fn *Function, p
 	// Parse output using universal JSON parser.
 	env, _ := ParseOutput(result.Raw, step.Output.Shape)
 	if env != nil {
+		// An empty envelope of the right shape ({"ops":[]} for
+		// a FileOps step) is a legitimate "nothing to do" result.
+		// Clear the raw text so the display layer does not print
+		// the JSON back to the user as if it were output.
+		if step.Output.Shape == ShapeFileOps && len(env.Ops) == 0 && env.Text == "" && len(env.Suggestions) == 0 {
+			if looksLikeEnvelope(result.Raw) {
+				result.Raw = ""
+			}
+		}
 		switch {
 		case len(env.Ops) > 0:
 			// Validate ops against the primitive schema BEFORE they flow

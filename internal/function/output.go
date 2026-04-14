@@ -35,6 +35,21 @@ func PrimitiveTypeName(shape OutputShape) string {
 	}
 }
 
+// looksLikeEnvelope returns true if the raw text looks like a JSON
+// object with one of the envelope's expected keys (ops, text,
+// suggestions). Used to distinguish a legitimate empty-result
+// envelope from arbitrary text that happens to round-trip through
+// json.Unmarshal into an empty OutputEnvelope.
+func looksLikeEnvelope(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	if !strings.HasPrefix(trimmed, "{") {
+		return false
+	}
+	return strings.Contains(trimmed, `"ops"`) ||
+		strings.Contains(trimmed, `"text"`) ||
+		strings.Contains(trimmed, `"suggestions"`)
+}
+
 // ParseOutput parses raw LLM output into an OutputEnvelope.
 // It tries JSON first, then falls back based on the expected shape.
 func ParseOutput(raw string, shape OutputShape) (*OutputEnvelope, error) {
@@ -61,6 +76,21 @@ func ParseOutput(raw string, shape OutputShape) (*OutputEnvelope, error) {
 		// Check which field is populated.
 		if env.Text != "" || len(env.Suggestions) > 0 || len(env.Ops) > 0 {
 			return &env, nil
+		}
+		// If the JSON parsed cleanly as an envelope but all fields
+		// are empty, honor it as a no-op result in the matching
+		// shape instead of falling through to the text fallback.
+		// {"ops":[]} means "nothing to do" for an ops function,
+		// not "here's some text that happens to look like JSON."
+		if looksLikeEnvelope(raw) {
+			switch shape {
+			case ShapeFileOps:
+				return &OutputEnvelope{Ops: nil}, nil
+			case ShapeStructured:
+				return &OutputEnvelope{Suggestions: nil}, nil
+			case ShapeText:
+				return &OutputEnvelope{Text: ""}, nil
+			}
 		}
 	}
 
