@@ -387,8 +387,34 @@ func TestSchemaInstructionMentionsRefinements(t *testing.T) {
 	if !strings.Contains(s, "file must resolve in KB") {
 		t.Errorf("schema for discussion-turn missing file-resolution constraint:\n%s", s)
 	}
-	if !strings.Contains(s, "file : string (required)") {
-		t.Errorf("schema for discussion-turn missing file field:\n%s", s)
+}
+
+// TestSchemaInstructionIncludesJSONPreamble verifies that the
+// composed schema starts with the primitive's prescriptive "you
+// MUST respond with JSON" preamble — not just a type summary.
+// Without this, the prompt doesn't actually instruct the LLM on
+// wire format and the LLM returns prose.
+func TestSchemaInstructionIncludesJSONPreamble(t *testing.T) {
+	r := exampleRegistry()
+
+	editSchema := r.SchemaInstruction("edit")
+	if !strings.Contains(editSchema, "MUST respond with a JSON object") {
+		t.Errorf("edit schema missing JSON preamble:\n%s", editSchema)
+	}
+	if !strings.Contains(editSchema, `"action": "edit"`) {
+		t.Errorf("edit schema missing action example:\n%s", editSchema)
+	}
+
+	createSchema := r.SchemaInstruction("create")
+	if !strings.Contains(createSchema, `"action": "create"`) {
+		t.Errorf("create schema missing action example:\n%s", createSchema)
+	}
+
+	// Derived type inherits the primitive's preamble and adds
+	// constraints.
+	turnSchema := r.SchemaInstruction("discussion-turn")
+	if !strings.Contains(turnSchema, "MUST respond with a JSON object") {
+		t.Errorf("discussion-turn schema missing JSON preamble:\n%s", turnSchema)
 	}
 }
 

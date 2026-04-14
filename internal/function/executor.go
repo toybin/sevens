@@ -403,13 +403,17 @@ func (e *Executor) executeStep(ctx context.Context, root string, fn *Function, p
 		systemPrompt := step.Backend.SystemPrompt
 		var schema string
 		if routedType != "" {
-			if allTypes != nil {
-				if td, ok := allTypes[string(routedType)]; ok {
-					schema = types.ComposeSchemaInstruction(td, allTypes)
-				}
-			}
+			// Picker resolved a specific primitive. Use the
+			// kernel's schema instruction — it's the single source
+			// of truth that also drives validation, so prompt and
+			// parser can never drift.
+			schema = primitiveRegistry.SchemaInstruction(routedType)
 		}
 		if schema == "" {
+			// Legacy path: static output type, resolved via
+			// internal/types. This is what every non-picker
+			// function uses today; it will be retired once all
+			// primitive schemas live in the kernel.
 			schema = e.resolveSchemaInstruction(step, allTypes)
 		}
 		if schema != "" {

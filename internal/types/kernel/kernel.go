@@ -510,35 +510,116 @@ func checkFields(specs []FieldSpec, v Value) error {
 
 // === Schema instruction ================================================
 
+// primitivePromptInstruction returns the prescriptive prompt text
+// for a primitive — the "you MUST respond with JSON..." preamble
+// that tells the LLM exactly what wire format to produce. This is
+// what makes the schema instruction actually useful as prompt
+// material rather than just a type summary.
+func primitivePromptInstruction(p Primitive) string {
+	switch p {
+	case PText:
+		return `You MUST respond with a JSON object containing a "text" field with your markdown-formatted response.
+Example: {"text": "**Observation** — The governance model assumes..."}
+Respond ONLY with valid JSON. No text outside the JSON object.`
+	case PCreate:
+		return `You MUST respond with a JSON object containing an "ops" field with an array of file operations.
+Each create operation: {"action": "create", "title": "Node Title", "parent": "Parent Title", "content": "markdown body", "extra": {"key": "value"}}
+The "extra" field sets frontmatter metadata on the new node.
+Respond ONLY with valid JSON. No text outside the JSON object.`
+	case PEdit:
+		return `You MUST respond with a JSON object containing an "ops" field with an array of edit operations.
+Each edit operation: {"action": "edit", "file": "Node Title", "old_text": "exact text to find", "new_text": "replacement text"}
+Respond ONLY with valid JSON. No text outside the JSON object.`
+	case PSuggestion:
+		return `You MUST respond with a JSON object containing a "suggestions" field with an array of suggestion objects.
+Each suggestion has a "title" and a "rationale".
+Example: {"suggestions": [{"title": "Revenue Models", "rationale": "Financial sustainability is unaddressed"}]}
+Respond ONLY with valid JSON. No text outside the JSON object.`
+	}
+	return ""
+}
+
 // SchemaInstruction composes the prompt-facing description of a type.
 // This is what the executor injects into the system prompt so the
 // LLM knows the exact shape it must return. It is the single source
 // of truth for both the prompt AND the validator — changing a field
 // or refinement updates both at once.
+//
+// Output structure:
+//
+//  1. The primitive's prescriptive prompt instruction (tells the
+//     LLM to return JSON in the right wire format).
+//  2. For derived types only: a "This type adds:" section listing
+//     extra fields on top of the primitive's shape.
+//  3. For types with refinements: a "Constraints:" section naming
+//     each refinement. Constraints are authoritative — the
+//     validator enforces them.
 func (r *Registry) SchemaInstruction(name TypeName) string {
-	fs := r.ComposedShape(name)
-	refs := r.CollectRefinements(name)
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "Type: %s\nFields:\n", name)
-	for _, f := range fs {
-		kindStr := "string"
-		switch f.Kind {
-		case FKContent:
-			kindStr = "markdown"
-		case FKExtra:
-			kindStr = "map<string,string>"
-		}
-		req := "optional"
-		if f.Required {
-			req = "required"
-		}
-		fmt.Fprintf(&sb, "  %s : %s (%s)\n", f.Name, kindStr, req)
+	td, ok := r.types[name]
+	if !ok {
+		return ""
 	}
+
+	var sb strings.Builder
+
+	// Start with the primitive's prescriptive instruction.
+	if prim, havePrim := r.RootPrimitive(name); havePrim {
+		if preamble := primitivePromptInstruction(prim); preamble != "" {
+			sb.WriteString(preamble)
+		}
+	}
+
+	// For derived types, list the extra fields.
+	if _, isDerived := td.(DerivedType); isDerived {
+		extras := collectLocalFields(r, name)
+		if len(extras) > 0 {
+			sb.WriteString("\n\nThis type (")
+			sb.WriteString(string(name))
+			sb.WriteString(") also requires:\n")
+			for _, f := range extras {
+				kindStr := "string"
+				switch f.Kind {
+				case FKContent:
+					kindStr = "markdown"
+				case FKExtra:
+					kindStr = "map<string,string>"
+				}
+				req := "optional"
+				if f.Required {
+					req = "required"
+				}
+				fmt.Fprintf(&sb, "  - %s : %s (%s)\n", f.Name, kindStr, req)
+			}
+		}
+	}
+
+	// List refinements last — they're the invariants the validator
+	// enforces, so the LLM needs to know about them explicitly.
+	refs := r.CollectRefinements(name)
 	if len(refs) > 0 {
-		sb.WriteString("Constraints:\n")
+		sb.WriteString("\n\nConstraints (enforced by the parser):\n")
 		for _, ref := range refs {
 			fmt.Fprintf(&sb, "  - %s\n", ref.Name())
 		}
 	}
+
 	return sb.String()
+}
+
+// collectLocalFields walks the extends chain root-first and returns
+// only the fields added at levels above the primitive — i.e. the
+// fields a derived type contributes on top of its primitive's base
+// shape. Used by SchemaInstruction to describe subtype constructors
+// without repeating the primitive's fields.
+func collectLocalFields(r *Registry, name TypeName) []FieldSpec {
+	td, ok := r.types[name]
+	if !ok {
+		return nil
+	}
+	if _, isPrim := td.(PrimitiveType); isPrim {
+		return nil
+	}
+	dt := td.(DerivedType)
+	parentFields := collectLocalFields(r, dt.ParentName)
+	return append(parentFields, dt.ExtraFields...)
 }
