@@ -1345,12 +1345,34 @@ func discussCmd() *cobra.Command {
 				if len(steps) == 0 {
 					return fmt.Errorf("discuss function has no steps")
 				}
-				rc, rcErr := function.ResolveContext(context.Background(), stack.KB, resolved, nodeTitle, steps[0], "")
+				step := steps[0]
+				rc, rcErr := function.ResolveContext(context.Background(), stack.KB, resolved, nodeTitle, step, "")
 				if rcErr != nil {
 					return fmt.Errorf("resolving context: %w", rcErr)
 				}
-				prompt := function.RenderPrompt(steps[0].Backend.PromptTemplate, rc)
-				fmt.Println(prompt)
+				userPrompt := function.RenderPrompt(step.Backend.PromptTemplate, rc)
+
+				// Show what the executor would actually send:
+				// picker resolution, composed schema instruction,
+				// then the rendered user prompt. This makes
+				// `--dry-run` useful for debugging prompts.
+				resolvedType, systemPrompt, previewErr := function.PreviewStepPrompt(
+					context.Background(), stack.KB, resolved, nodeTitle, step)
+				if previewErr != nil {
+					fmt.Fprintf(os.Stderr, "[warn] preview: %v\n", previewErr)
+				}
+				fmt.Println("=== picker ===")
+				if resolvedType != "" {
+					fmt.Printf("resolved output type: %s\n", resolvedType)
+				} else {
+					fmt.Println("resolved output type: (static, no picker)")
+				}
+				fmt.Println()
+				fmt.Println("=== system prompt ===")
+				fmt.Println(systemPrompt)
+				fmt.Println()
+				fmt.Println("=== user prompt ===")
+				fmt.Println(userPrompt)
 				return nil
 			}
 
