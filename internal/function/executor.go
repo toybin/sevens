@@ -402,18 +402,30 @@ func (e *Executor) executeStep(ctx context.Context, root string, fn *Function, p
 		// declared type (the static path).
 		systemPrompt := step.Backend.SystemPrompt
 		var schema string
-		if routedType != "" {
+		switch {
+		case routedType != "":
 			// Picker resolved a specific primitive. Use the
-			// kernel's schema instruction — it's the single source
-			// of truth that also drives validation, so prompt and
+			// kernel's schema instruction — the single source of
+			// truth that also drives validation, so prompt and
 			// parser can never drift.
 			schema = primitiveRegistry.SchemaInstruction(routedType)
+
+		case step.Output.TypeName != "":
+			// Static-output with a declared subtype (e.g. `task`).
+			// The legacy composer still owns user-defined subtypes
+			// and their constructor fields; that migration is
+			// staged for a later pass.
+			schema = e.resolveSchemaInstruction(step, allTypes)
+
+		default:
+			// Bare primitive derived from the step's declared
+			// shape. Use the kernel composer — same source of
+			// truth as the picker path.
+			primName := kernel.TypeName(PrimitiveTypeName(step.Output.Shape))
+			schema = primitiveRegistry.SchemaInstruction(primName)
 		}
 		if schema == "" {
-			// Legacy path: static output type, resolved via
-			// internal/types. This is what every non-picker
-			// function uses today; it will be retired once all
-			// primitive schemas live in the kernel.
+			// Last-resort fallback to the legacy composer.
 			schema = e.resolveSchemaInstruction(step, allTypes)
 		}
 		if schema != "" {
