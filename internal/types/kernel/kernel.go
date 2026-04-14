@@ -311,15 +311,22 @@ func (r *Registry) Names() []TypeName {
 
 // Ancestors returns name followed by its parent chain up to the
 // primitive root (inclusive). Returns nil if name is not in the
-// registry.
+// registry. A cycle in the :extends chain (malformed registry) is
+// broken at the first repeat; the returned slice contains each name
+// at most once.
 func (r *Registry) Ancestors(name TypeName) []TypeName {
 	var chain []TypeName
+	seen := make(map[TypeName]bool)
 	current := name
 	for current != "" {
+		if seen[current] {
+			return chain
+		}
 		td, ok := r.types[current]
 		if !ok {
 			return chain
 		}
+		seen[current] = true
 		chain = append(chain, current)
 		current = td.Parent()
 	}
@@ -346,12 +353,21 @@ func (r *Registry) IsSubtype(sub, super TypeName) bool {
 // This is the runtime half of input-dependent output type resolution:
 // a function declared as `:output :child-of-input` will call this at
 // dispatch time with the target's most-specific type.
+//
+// Cycles in the :extends chain return ("", false) rather than
+// infinite-looping.
 func (r *Registry) ChildTypeOf(name TypeName) (TypeName, bool) {
 	td, ok := r.types[name]
 	if !ok {
 		return "", false
 	}
+	seen := make(map[TypeName]bool)
 	for {
+		currentName := td.Name()
+		if seen[currentName] {
+			return "", false
+		}
+		seen[currentName] = true
 		d, isDerived := td.(DerivedType)
 		if !isDerived {
 			return "", false // primitive — no child type
@@ -382,14 +398,20 @@ func (r *Registry) SubtypesOf(name TypeName) []TypeName {
 }
 
 // RootPrimitive returns the primitive at the root of name's extends
-// chain. Returns (0, false) if name is unknown or the chain is
-// broken.
+// chain. Returns (0, false) if name is unknown, the chain is broken,
+// or a cycle is detected.
 func (r *Registry) RootPrimitive(name TypeName) (Primitive, bool) {
 	td, ok := r.types[name]
 	if !ok {
 		return 0, false
 	}
+	seen := make(map[TypeName]bool)
 	for {
+		currentName := td.Name()
+		if seen[currentName] {
+			return 0, false
+		}
+		seen[currentName] = true
 		if p, isPrim := td.(PrimitiveType); isPrim {
 			return p.Kind, true
 		}
@@ -405,17 +427,30 @@ func (r *Registry) RootPrimitive(name TypeName) (Primitive, bool) {
 
 // ComposedShape returns the complete field list for a type, walking
 // its parent chain. Parent fields come first; a child type's extra
-// fields override parent fields of the same name.
+// fields override parent fields of the same name. A cycle in the
+// :extends chain (malformed registry) is broken at the first
+// repeat and the chain's accumulation stops there.
 func (r *Registry) ComposedShape(name TypeName) []FieldSpec {
+	return r.composedShape(name, nil)
+}
+
+func (r *Registry) composedShape(name TypeName, seen map[TypeName]bool) []FieldSpec {
 	td, ok := r.types[name]
 	if !ok {
 		return nil
 	}
+	if seen == nil {
+		seen = make(map[TypeName]bool)
+	}
+	if seen[name] {
+		return nil
+	}
+	seen[name] = true
 	switch t := td.(type) {
 	case PrimitiveType:
 		return primitiveShape(t.Kind)
 	case DerivedType:
-		parent := r.ComposedShape(t.ParentName)
+		parent := r.composedShape(t.ParentName, seen)
 		return overrideFields(parent, t.ExtraFields)
 	}
 	return nil
@@ -446,17 +481,29 @@ func overrideFields(old, overrides []FieldSpec) []FieldSpec {
 // CollectRefinements walks the extends chain and returns all
 // refinements in root-first order (parent refinements before child).
 // This ordering is load-bearing: refinement errors fire top-down so
-// the user sees structural constraints before nested ones.
+// the user sees structural constraints before nested ones. A cycle
+// in the :extends chain is broken at the first repeat.
 func (r *Registry) CollectRefinements(name TypeName) []Refinement {
+	return r.collectRefinements(name, nil)
+}
+
+func (r *Registry) collectRefinements(name TypeName, seen map[TypeName]bool) []Refinement {
 	td, ok := r.types[name]
 	if !ok {
 		return nil
 	}
+	if seen == nil {
+		seen = make(map[TypeName]bool)
+	}
+	if seen[name] {
+		return nil
+	}
+	seen[name] = true
 	switch t := td.(type) {
 	case PrimitiveType:
 		return nil
 	case DerivedType:
-		parent := r.CollectRefinements(t.ParentName)
+		parent := r.collectRefinements(t.ParentName, seen)
 		out := make([]Refinement, 0, len(parent)+len(t.Refinements))
 		out = append(out, parent...)
 		out = append(out, t.Refinements...)
@@ -523,12 +570,14 @@ Example: {"text": "**Observation** — The governance model assumes..."}
 Respond ONLY with valid JSON. No text outside the JSON object.`
 	case PCreate:
 		return `You MUST respond with a JSON object containing an "ops" field with an array of file operations.
-Each create operation: {"action": "create", "title": "Node Title", "parent": "Parent Title", "content": "markdown body", "extra": {"key": "value"}}
+Each create operation has fields: action (always "create"), title, parent, content, extra.
 The "extra" field sets frontmatter metadata on the new node.
+Example: {"ops":[{"action":"create","title":"Node Title","parent":"Parent Title","content":"markdown body","extra":{"key":"value"}}]}
 Respond ONLY with valid JSON. No text outside the JSON object.`
 	case PEdit:
 		return `You MUST respond with a JSON object containing an "ops" field with an array of edit operations.
-Each edit operation: {"action": "edit", "file": "Node Title", "old_text": "exact text to find", "new_text": "replacement text"}
+Each edit operation has fields: action (always "edit"), file, old_text, new_text.
+Example: {"ops":[{"action":"edit","file":"Node Title","old_text":"exact text to find","new_text":"replacement text"}]}
 Respond ONLY with valid JSON. No text outside the JSON object.`
 	case PSuggestion:
 		return `You MUST respond with a JSON object containing a "suggestions" field with an array of suggestion objects.

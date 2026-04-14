@@ -173,6 +173,60 @@ func TestSubtypesOf_SuggestionIncludesDimension(t *testing.T) {
 	}
 }
 
+// TestChainWalks_BreakCycles verifies that all four chain-walking
+// functions (Ancestors, RootPrimitive, ChildTypeOf, ComposedShape,
+// CollectRefinements) terminate on a malformed registry where a
+// type's :extends chain contains a cycle. Without cycle detection,
+// any of these would infinite-loop or stack-overflow.
+func TestChainWalks_BreakCycles(t *testing.T) {
+	r := NewPrimitivesRegistry()
+	// Construct a three-node cycle: a → b → c → a.
+	r.Insert(DerivedType{TName: "a", ParentName: "b"})
+	r.Insert(DerivedType{TName: "b", ParentName: "c"})
+	r.Insert(DerivedType{TName: "c", ParentName: "a"})
+
+	// Ancestors returns a finite slice without looping forever.
+	chain := r.Ancestors("a")
+	if len(chain) > 3 {
+		t.Errorf("Ancestors should stop at the cycle, got %v", chain)
+	}
+
+	// RootPrimitive returns (0, false) because the chain never hits
+	// a primitive.
+	if _, ok := r.RootPrimitive("a"); ok {
+		t.Errorf("RootPrimitive on cyclic chain should return false")
+	}
+
+	// ChildTypeOf returns ("", false) because no node declares a
+	// ChildType and the walk terminates at the cycle.
+	if _, ok := r.ChildTypeOf("a"); ok {
+		t.Errorf("ChildTypeOf on cyclic chain should return false")
+	}
+
+	// ComposedShape and CollectRefinements terminate without
+	// stack-overflow. The specific field list doesn't matter —
+	// just that the call returns.
+	_ = r.ComposedShape("a")
+	_ = r.CollectRefinements("a")
+}
+
+// TestChainWalks_SelfCycle verifies the degenerate case where a
+// type's parent is itself (a → a).
+func TestChainWalks_SelfCycle(t *testing.T) {
+	r := NewPrimitivesRegistry()
+	r.Insert(DerivedType{TName: "self", ParentName: "self"})
+
+	chain := r.Ancestors("self")
+	if len(chain) > 1 {
+		t.Errorf("Ancestors on self-cycle should return at most 1 element, got %v", chain)
+	}
+	if _, ok := r.RootPrimitive("self"); ok {
+		t.Errorf("RootPrimitive on self-cycle should return false")
+	}
+	_ = r.ComposedShape("self")
+	_ = r.CollectRefinements("self")
+}
+
 func TestSubtypesOf_TaskIncludesOnlyTaskSubtypes(t *testing.T) {
 	// With just the family registry, SubtypesOf(task) should be {task}.
 	// After inserting urgent-task extending task, should be {task, urgent-task}.

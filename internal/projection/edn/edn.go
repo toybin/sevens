@@ -218,15 +218,22 @@ func expandFunction(data []byte, name, dir string) ([]triple.Triple, error) {
 		// Output picker: store the original EDN source for the
 		// :output-picker key so the graph loader can reparse it.
 		// We re-serialize the decoded value back to EDN rather than
-		// trying to extract the substring from the file.
+		// trying to extract the substring from the file. A marshal
+		// failure here is a real problem — it means the function's
+		// polymorphic dispatch will silently disappear from the
+		// graph — so propagate it rather than swallowing.
 		if raw.OutputPicker != nil {
-			if pickerEDN, err := ednencode.Marshal(raw.OutputPicker); err == nil {
-				ts = append(ts, triple.Triple{
-					Subject:   subj,
-					Predicate: kb.PredFnOutputPicker,
-					Object:    string(pickerEDN),
-				})
+			pickerEDN, err := ednencode.Marshal(raw.OutputPicker)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"function %q: serializing :output-picker for graph storage: %w",
+					name, err)
 			}
+			ts = append(ts, triple.Triple{
+				Subject:   subj,
+				Predicate: kb.PredFnOutputPicker,
+				Object:    string(pickerEDN),
+			})
 		}
 
 		// Prompt: inline or .md sidecar

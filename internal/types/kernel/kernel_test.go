@@ -401,13 +401,21 @@ func TestSchemaInstructionIncludesJSONPreamble(t *testing.T) {
 	if !strings.Contains(editSchema, "MUST respond with a JSON object") {
 		t.Errorf("edit schema missing JSON preamble:\n%s", editSchema)
 	}
-	if !strings.Contains(editSchema, `"action": "edit"`) {
+	if !strings.Contains(editSchema, `"action":"edit"`) {
 		t.Errorf("edit schema missing action example:\n%s", editSchema)
+	}
+	// The example must show the full envelope (ops array), not the
+	// bare op — bug #2 from the code review.
+	if !strings.Contains(editSchema, `"ops":[`) {
+		t.Errorf("edit schema example should show full envelope with ops wrapper:\n%s", editSchema)
 	}
 
 	createSchema := r.SchemaInstruction("create")
-	if !strings.Contains(createSchema, `"action": "create"`) {
+	if !strings.Contains(createSchema, `"action":"create"`) {
 		t.Errorf("create schema missing action example:\n%s", createSchema)
+	}
+	if !strings.Contains(createSchema, `"ops":[`) {
+		t.Errorf("create schema example should show full envelope with ops wrapper:\n%s", createSchema)
 	}
 
 	// Derived type inherits the primitive's preamble and adds

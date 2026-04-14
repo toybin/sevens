@@ -110,7 +110,7 @@ func syncRoot(rootDir string) error {
 		if len(files) > 0 {
 			hash, err := projmd.CommitFiles(root, "sevens: sync", files)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "%s git commit failed: %v\n", ui.Success.Render("[sync]"), err)
+				fmt.Fprintf(os.Stderr, "%s git commit failed: %v\n", ui.Warning.Render("[sync]"), err)
 			} else {
 				fmt.Fprintf(os.Stderr, "%s Committed changes: %s\n", ui.Success.Render("[sync]"), hash)
 			}

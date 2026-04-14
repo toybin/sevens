@@ -203,8 +203,12 @@ func TestLoadTypeDefRoundTrip(t *testing.T) {
 		t.Fatalf("expected 3 optional predicates, got %d: %v", len(td.Predicates.Optional), td.Predicates.Optional)
 	}
 
-	if td.Structure.ParentType != "project" {
-		t.Fatalf("expected parent type 'project', got %q", td.Structure.ParentType)
+	// task's :parent-type was removed from defaults/types/task.edn
+	// because no `project` type existed in the registry. If you
+	// reintroduce a parent-type constraint on task, update the
+	// declaration AND the corresponding type file.
+	if td.Structure.ParentType != "" {
+		t.Fatalf("expected no parent type, got %q", td.Structure.ParentType)
 	}
 	if td.Structure.ChildrenMin != 0 || td.Structure.ChildrenMax != 5 {
 		t.Fatalf("expected children [0, 5], got [%d, %d]", td.Structure.ChildrenMin, td.Structure.ChildrenMax)

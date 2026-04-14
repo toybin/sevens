@@ -408,12 +408,21 @@ func displayWorkflowAcceptResult(r *workflow.AcceptResult) {
 	}
 
 	// Completed
-	if len(r.FilesCreated) > 0 || len(r.FilesEdited) > 0 {
+	switch {
+	case len(r.FilesCreated) > 0 || len(r.FilesEdited) > 0:
 		fmt.Fprintf(os.Stderr, "%s Applied %s to %s\n",
 			ui.Success.Render("[accept]"),
 			ui.Label.Render(r.FunctionName),
 			ui.NodeTitle.Render(r.Target))
-	} else {
+	case len(r.Suggestions) > 0:
+		// A gated step's accept advanced to a suggestion-shaped
+		// completion. Display formatted, not raw JSON.
+		if formatted := formatSuggestions(r.Suggestions); formatted != "" {
+			fmt.Print(formatted)
+		}
+	case r.IsText && r.Output != "":
+		fmt.Println(ui.RenderMarkdownOrPlain(r.Output))
+	default:
 		fmt.Fprintf(os.Stderr, "%s Accepted %s for %s\n",
 			ui.Success.Render("[accept]"),
 			ui.Label.Render(r.FunctionName),

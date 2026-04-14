@@ -41,7 +41,8 @@ func PreviewStepPrompt(
 	}
 
 	// Phase 2: schema composition (matches executor.go's three-way
-	// dispatch exactly — picker, subtype, or bare primitive).
+	// dispatch exactly — picker, subtype, or bare primitive, with
+	// a final legacy-composer fallback).
 	allTypes, _ := types.LoadAllTypeDefs()
 	var schema string
 	switch {
@@ -60,6 +61,23 @@ func PreviewStepPrompt(
 	default:
 		primName := kernel.TypeName(PrimitiveTypeName(step.Output.Shape))
 		schema = primitiveRegistry.SchemaInstruction(primName)
+	}
+	// Final legacy-composer fallback — mirrors the executor. Only
+	// fires if nothing above produced a schema (e.g. kernel didn't
+	// know the resolved type). Keeps preview and executor output
+	// identical under the same inputs.
+	if schema == "" {
+		if step.Output.TypeName != "" {
+			if td, ok := allTypes[step.Output.TypeName]; ok {
+				schema = types.ComposeSchemaInstruction(td, allTypes)
+			}
+		}
+		if schema == "" {
+			primName := PrimitiveTypeName(step.Output.Shape)
+			if td, ok := allTypes[primName]; ok {
+				schema = types.ComposeSchemaInstruction(td, allTypes)
+			}
+		}
 	}
 
 	// Phase 3: assemble the system prompt (matches executor.go's
