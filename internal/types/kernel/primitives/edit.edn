@@ -1,0 +1,15 @@
+{:name "edit"
+ :primitive true
+ :envelope
+ {:kind :array
+  :wrapper "ops"
+  :item-constants [{:name "action" :value "edit"}]
+  :item-fields
+  [{:name "file"     :kind :string :required true}
+   {:name "old_text" :kind :string :required true}
+   {:name "new_text" :kind :string :required true}]}
+ :example
+ {"ops" [{"action"   "edit"
+          "file"     "Node Title"
+          "old_text" "exact text to find"
+          "new_text" "replacement text"}]}}

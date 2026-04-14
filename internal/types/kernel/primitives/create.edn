@@ -1,0 +1,17 @@
+{:name "create"
+ :primitive true
+ :envelope
+ {:kind :array
+  :wrapper "ops"
+  :item-constants [{:name "action" :value "create"}]
+  :item-fields
+  [{:name "title"   :kind :string   :required true}
+   {:name "parent"  :kind :string   :required false}
+   {:name "content" :kind :markdown :required true}
+   {:name "extra"   :kind :map      :required false}]}
+ :example
+ {"ops" [{"action"  "create"
+          "title"   "Node Title"
+          "parent"  "Parent Title"
+          "content" "markdown body"
+          "extra"   {"key" "value"}}]}}

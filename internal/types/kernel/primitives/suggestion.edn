@@ -1,0 +1,11 @@
+{:name "suggestion"
+ :primitive true
+ :envelope
+ {:kind :array
+  :wrapper "suggestions"
+  :item-fields
+  [{:name "title"     :kind :string :required true}
+   {:name "rationale" :kind :string :required true}]}
+ :example
+ {"suggestions" [{"title"     "Revenue Models"
+                  "rationale" "Financial sustainability is unaddressed in the current node; worth a dedicated child."}]}}

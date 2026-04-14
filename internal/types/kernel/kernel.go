@@ -80,30 +80,48 @@ type FieldSpec struct {
 	Required bool
 }
 
-func primitiveShape(p Primitive) []FieldSpec {
-	switch p {
-	case PText:
-		return []FieldSpec{{Name: "text", Kind: FKString, Required: true}}
-	case PCreate:
-		return []FieldSpec{
-			{Name: "title", Kind: FKString, Required: true},
-			{Name: "parent", Kind: FKString, Required: false},
-			{Name: "content", Kind: FKContent, Required: true},
-			{Name: "extra", Kind: FKExtra, Required: false},
-		}
-	case PEdit:
-		return []FieldSpec{
-			{Name: "file", Kind: FKString, Required: true},
-			{Name: "old_text", Kind: FKString, Required: true},
-			{Name: "new_text", Kind: FKString, Required: true},
-		}
-	case PSuggestion:
-		return []FieldSpec{
-			{Name: "title", Kind: FKString, Required: true},
-			{Name: "rationale", Kind: FKString, Required: true},
-		}
-	}
-	return nil
+// EnvelopeKind is the shape of a primitive's top-level JSON
+// wrapper — either a single field holding a scalar value, or a
+// single field holding an array of objects.
+type EnvelopeKind int
+
+const (
+	// ScalarEnvelope: {"<wrapper>": <scalar>}. Used by text.
+	ScalarEnvelope EnvelopeKind = iota
+	// ArrayEnvelope: {"<wrapper>": [{...}, ...]}. Used by create,
+	// edit, suggestion — each produces an array of typed items.
+	ArrayEnvelope
+)
+
+// NameValue is a single name=value pair used to express constant
+// fields in an array envelope's items. The canonical use is action
+// tags: create ops always have {"action": "create"}, edit ops
+// always have {"action": "edit"}. Constants are emitted in the
+// prompt instructions and in the example but not in the kernel's
+// field-level validation (routing on action happens upstream in
+// ValidateOps).
+type NameValue struct {
+	Name  string
+	Value string
+}
+
+// Envelope describes the JSON shape a primitive type produces.
+// Loaded from EDN via internal/types/kernel/primitives/*.edn —
+// see loader.go. Two variants:
+//
+//	ScalarEnvelope — text primitive. Wrapper is the top-level JSON
+//	  key (e.g. "text"), ScalarField is the (single) field spec.
+//
+//	ArrayEnvelope — create/edit/suggestion primitives. Wrapper is
+//	  the top-level key (e.g. "ops"), ItemFields describes each
+//	  object in the array, ItemConstants are action-tag style
+//	  fixed values shown in the prompt but not validated here.
+type Envelope struct {
+	Kind          EnvelopeKind
+	Wrapper       string
+	ScalarField   FieldSpec   // ScalarEnvelope only
+	ItemFields    []FieldSpec // ArrayEnvelope only
+	ItemConstants []NameValue // ArrayEnvelope only
 }
 
 // === Values ============================================================
@@ -228,15 +246,35 @@ type TypeDef interface {
 }
 
 // PrimitiveType is the TypeDef for one of the four built-in primitives.
+// Populated at startup from an EDN file in internal/types/kernel/primitives/.
+// The Envelope carries the structured shape the validator walks, and
+// Example is a pre-marshaled JSON bytes blob the renderer embeds
+// verbatim into prompts (json.Marshal'd once at load time so the
+// example is guaranteed syntactically valid).
 type PrimitiveType struct {
-	Kind Primitive
+	Kind     Primitive
+	Envelope Envelope
+	Example  []byte
 }
 
 func (p PrimitiveType) Name() TypeName   { return p.Kind.Name() }
 func (p PrimitiveType) Parent() TypeName { return "" }
+
+// LocalFields returns the validator-facing fields for this
+// primitive. For scalar envelopes (text), that's the single
+// wrapper field. For array envelopes (create/edit/suggestion),
+// it's the item-level fields — routing constants like "action"
+// are not returned here; they live in Envelope.ItemConstants.
 func (p PrimitiveType) LocalFields() []FieldSpec {
-	return primitiveShape(p.Kind)
+	switch p.Envelope.Kind {
+	case ScalarEnvelope:
+		return []FieldSpec{p.Envelope.ScalarField}
+	case ArrayEnvelope:
+		return p.Envelope.ItemFields
+	}
+	return nil
 }
+
 func (p PrimitiveType) LocalRefinements() []Refinement { return nil }
 func (p PrimitiveType) isTypeDef()                     {}
 
@@ -276,13 +314,18 @@ func NewRegistry() *Registry {
 }
 
 // NewPrimitivesRegistry returns a registry pre-populated with the
-// four primitive types. User-defined types should be Inserted after.
+// four primitive types, loaded from the embedded EDN files in
+// internal/types/kernel/primitives/. Panics if loading fails —
+// primitives are embedded at compile time, so a failure here
+// means the release is broken and we'd rather crash at startup
+// than silently produce malformed prompts.
+//
+// User-defined types should be Inserted after.
 func NewPrimitivesRegistry() *Registry {
-	r := NewRegistry()
-	r.Insert(PrimitiveType{Kind: PText})
-	r.Insert(PrimitiveType{Kind: PCreate})
-	r.Insert(PrimitiveType{Kind: PEdit})
-	r.Insert(PrimitiveType{Kind: PSuggestion})
+	r, err := LoadPrimitives()
+	if err != nil {
+		panic(fmt.Sprintf("kernel: loading embedded primitives: %v", err))
+	}
 	return r
 }
 
@@ -448,7 +491,7 @@ func (r *Registry) composedShape(name TypeName, seen map[TypeName]bool) []FieldS
 	seen[name] = true
 	switch t := td.(type) {
 	case PrimitiveType:
-		return primitiveShape(t.Kind)
+		return t.LocalFields()
 	case DerivedType:
 		parent := r.composedShape(t.ParentName, seen)
 		return overrideFields(parent, t.ExtraFields)
@@ -557,37 +600,6 @@ func checkFields(specs []FieldSpec, v Value) error {
 
 // === Schema instruction ================================================
 
-// primitivePromptInstruction returns the prescriptive prompt text
-// for a primitive — the "you MUST respond with JSON..." preamble
-// that tells the LLM exactly what wire format to produce. This is
-// what makes the schema instruction actually useful as prompt
-// material rather than just a type summary.
-func primitivePromptInstruction(p Primitive) string {
-	switch p {
-	case PText:
-		return `You MUST respond with a JSON object containing a "text" field with your markdown-formatted response.
-Example: {"text": "**Observation** — The governance model assumes..."}
-Respond ONLY with valid JSON. No text outside the JSON object.`
-	case PCreate:
-		return `You MUST respond with a JSON object containing an "ops" field with an array of file operations.
-Each create operation has fields: action (always "create"), title, parent, content, extra.
-The "extra" field sets frontmatter metadata on the new node.
-Example: {"ops":[{"action":"create","title":"Node Title","parent":"Parent Title","content":"markdown body","extra":{"key":"value"}}]}
-Respond ONLY with valid JSON. No text outside the JSON object.`
-	case PEdit:
-		return `You MUST respond with a JSON object containing an "ops" field with an array of edit operations.
-Each edit operation has fields: action (always "edit"), file, old_text, new_text.
-Example: {"ops":[{"action":"edit","file":"Node Title","old_text":"exact text to find","new_text":"replacement text"}]}
-Respond ONLY with valid JSON. No text outside the JSON object.`
-	case PSuggestion:
-		return `You MUST respond with a JSON object containing a "suggestions" field with an array of suggestion objects.
-Each suggestion has a "title" and a "rationale".
-Example: {"suggestions": [{"title": "Revenue Models", "rationale": "Financial sustainability is unaddressed"}]}
-Respond ONLY with valid JSON. No text outside the JSON object.`
-	}
-	return ""
-}
-
 // SchemaInstruction composes the prompt-facing description of a type.
 // This is what the executor injects into the system prompt so the
 // LLM knows the exact shape it must return. It is the single source
@@ -611,10 +623,12 @@ func (r *Registry) SchemaInstruction(name TypeName) string {
 
 	var sb strings.Builder
 
-	// Start with the primitive's prescriptive instruction.
+	// Start with the primitive's prescriptive instruction, rendered
+	// from the primitive's envelope and example (loaded from EDN).
 	if prim, havePrim := r.RootPrimitive(name); havePrim {
-		if preamble := primitivePromptInstruction(prim); preamble != "" {
-			sb.WriteString(preamble)
+		// Look up the PrimitiveType to get the structured envelope.
+		if pt, ok := r.types[prim.Name()].(PrimitiveType); ok {
+			sb.WriteString(renderPrimitivePrompt(pt))
 		}
 	}
 

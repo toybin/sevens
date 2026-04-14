@@ -1,0 +1,8 @@
+{:name "text"
+ :primitive true
+ :envelope
+ {:kind :scalar
+  :wrapper "text"
+  :scalar-field {:name "text" :kind :markdown :required true}}
+ :example
+ {"text" "**Observation** — The governance model assumes community buy-in that has not been demonstrated."}}
