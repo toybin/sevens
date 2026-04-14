@@ -79,8 +79,28 @@ func applyCmd2() *cobra.Command {
 				if rcErr != nil {
 					return fmt.Errorf("resolving context: %w", rcErr)
 				}
-				prompt := function.RenderPrompt(step.Backend.PromptTemplate, rc)
-				fmt.Println(prompt)
+				userPrompt := function.RenderPrompt(step.Backend.PromptTemplate, rc)
+
+				// Preview the picker resolution and composed schema
+				// the executor would use. Same shape as discuss
+				// --dry-run output for consistency.
+				resolvedType, systemPrompt, previewErr := function.PreviewStepPrompt(
+					context.Background(), stack.KB, resolved, nodeTitle, step)
+				if previewErr != nil {
+					fmt.Fprintf(os.Stderr, "[warn] preview: %v\n", previewErr)
+				}
+				fmt.Println("=== picker ===")
+				if resolvedType != "" {
+					fmt.Printf("resolved output type: %s\n", resolvedType)
+				} else {
+					fmt.Println("resolved output type: (static, no picker)")
+				}
+				fmt.Println()
+				fmt.Println("=== system prompt ===")
+				fmt.Println(systemPrompt)
+				fmt.Println()
+				fmt.Println("=== user prompt ===")
+				fmt.Println(userPrompt)
 				return nil
 			}
 
